@@ -50,7 +50,8 @@ export default function CatalogoPage() {
   const destacados = productosFiltrados.filter((p) => p.destacado);
   const resto = productosFiltrados.filter((p) => !p.destacado);
 
-  function agregarAlCarrito(producto: Producto) {
+    function agregarAlCarrito(producto: Producto) {
+    setEnviado(false);
     setCarrito((prev) => {
       const existente = prev[producto.id];
       return {
