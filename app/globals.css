@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-display: 'Fraunces', serif;
+  --font-body: 'Inter', sans-serif;
+}
+
+body {
+  background-color: #f7f9fa;
+  color: theme('colors.ink');
+}
+
+.btn-primary {
+  @apply bg-mango-500 hover:bg-mango-600 text-white font-semibold px-4 py-2 rounded-card transition-colors;
+}
+
+.btn-secondary {
+  @apply bg-frost-700 hover:bg-frost-800 text-white font-semibold px-4 py-2 rounded-card transition-colors;
+}
+
+.input-field {
+  @apply w-full border border-frost-200 rounded-card px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-frost-400;
+}
