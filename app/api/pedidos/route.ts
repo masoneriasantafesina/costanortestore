@@ -1,11 +1,17 @@
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 
-// Usamos la anon key: la tabla "pedidos" tiene una política RLS que permite
-// insertar pedidos públicos solo con estado 'nuevo' y origen 'catalogo_web'.
+// Esta ruta corre en el servidor (nunca en el navegador), así que puede usar
+// la service_role key con seguridad. La necesitamos porque el rol público
+// (anon) puede INSERTAR un pedido nuevo pero no tiene permiso de LECTURA
+// sobre la tabla "pedidos" (eso queda reservado a los administradores
+// logueados). Insertar y a la vez pedir de vuelta el registro creado
+// requiere permiso de lectura, así que con la anon key esta operación
+// fallaba en silencio. La service_role key evita las políticas RLS de forma
+// segura porque solo vive en el servidor.
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
 export async function POST(req: Request) {
