@@ -1,4 +1,4 @@
-# Grido Store y Mayorista — Fase 1 (MVP)
+# Grido Store y Mayorista — Fase 1 (MVP)sadasd
 
 Guía paso a paso para poner esto en funcionamiento sin experiencia previa en programación.
 
