@@ -5,6 +5,7 @@ import type { ReactNode } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import type { Pedido } from '@/lib/types';
 import { MARCA_PRODUCTO_LABEL, UNIDAD_NEGOCIO_LABEL } from '@/lib/types';
+import { formatearPesos } from '@/lib/formato';
 
 type RangoPreset = 'hoy' | 'semana' | 'mes' | 'personalizado';
 
@@ -397,7 +398,7 @@ export default function EstadisticasPage() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <TarjetaKpi
           titulo="Total ventas"
-          valor={`$${totalesActual.totalMonto.toFixed(2)}`}
+          valor={`${formatearPesos(totalesActual.totalMonto)}`}
           variacion={variacion(totalesActual.totalMonto, totalesAnterior.totalMonto)}
         />
         <TarjetaKpi
@@ -412,7 +413,7 @@ export default function EstadisticasPage() {
         />
         <TarjetaKpi
           titulo="Ticket promedio"
-          valor={`$${totalesActual.ticketPromedio.toFixed(2)}`}
+          valor={`${formatearPesos(totalesActual.ticketPromedio)}`}
           variacion={variacion(totalesActual.ticketPromedio, totalesAnterior.ticketPromedio)}
         />
       </div>
@@ -427,7 +428,7 @@ export default function EstadisticasPage() {
               <div className="flex-1 bg-frost-50 rounded-card h-5 overflow-hidden">
                 <div className="bg-frost-600 h-full rounded-card" style={{ width: `${(v.monto / maxVentaDia) * 100}%` }} />
               </div>
-              <span className="text-xs text-frost-700 font-medium w-20 text-right shrink-0">${v.monto.toFixed(2)}</span>
+              <span className="text-xs text-frost-700 font-medium w-20 text-right shrink-0">{formatearPesos(v.monto)}</span>
             </div>
           ))}
         </div>
@@ -438,13 +439,13 @@ export default function EstadisticasPage() {
         <Seccion titulo="Ventas por marca">
           <TablaSimple
             columnas={['Marca', 'Monto', 'Kilos', 'Pedidos']}
-            filas={ventasPorMarca.map((v) => [v.marca, `$${v.monto.toFixed(2)}`, `${v.kg.toFixed(2)} kg`, String(v.cantidad)])}
+            filas={ventasPorMarca.map((v) => [v.marca, `${formatearPesos(v.monto)}`, `${v.kg.toFixed(2)} kg`, String(v.cantidad)])}
           />
         </Seccion>
         <Seccion titulo="Ventas por unidad de negocio">
           <TablaSimple
             columnas={['Unidad', 'Monto', 'Kilos', 'Pedidos']}
-            filas={ventasPorUnidad.map((v) => [v.unidad, `$${v.monto.toFixed(2)}`, `${v.kg.toFixed(2)} kg`, String(v.cantidad)])}
+            filas={ventasPorUnidad.map((v) => [v.unidad, `${formatearPesos(v.monto)}`, `${v.kg.toFixed(2)} kg`, String(v.cantidad)])}
           />
         </Seccion>
       </div>
@@ -468,7 +469,7 @@ export default function EstadisticasPage() {
       >
         <TablaSimple
           columnas={['Producto', 'Unidades', 'Kilos', 'Monto']}
-          filas={productosVendidos.map((p) => [p.nombre, String(p.unidades), `${p.kilos.toFixed(2)} kg`, `$${p.monto.toFixed(2)}`])}
+          filas={productosVendidos.map((p) => [p.nombre, String(p.unidades), `${p.kilos.toFixed(2)} kg`, `${formatearPesos(p.monto)}`])}
         />
       </Seccion>
 
@@ -491,7 +492,7 @@ export default function EstadisticasPage() {
       >
         <TablaSimple
           columnas={['Cliente', 'Monto', 'Kilos', 'Pedidos']}
-          filas={rankingClientes.map((c) => [c.nombre, `$${c.monto.toFixed(2)}`, `${c.kilos.toFixed(2)} kg`, String(c.cantidad)])}
+          filas={rankingClientes.map((c) => [c.nombre, `${formatearPesos(c.monto)}`, `${c.kilos.toFixed(2)} kg`, String(c.cantidad)])}
         />
       </Seccion>
 
@@ -506,7 +507,7 @@ export default function EstadisticasPage() {
                 <div className="bg-teal-500 h-full rounded-card" style={{ width: `${m.porcentaje}%` }} />
               </div>
               <span className="text-xs text-frost-700 font-medium w-32 text-right shrink-0">
-                ${m.monto.toFixed(2)} ({m.porcentaje.toFixed(1)}%)
+                {formatearPesos(m.monto)} ({m.porcentaje.toFixed(1)}%)
               </span>
             </div>
           ))}
@@ -514,7 +515,7 @@ export default function EstadisticasPage() {
       </Seccion>
 
       {/* Pendientes de pago */}
-      <Seccion titulo={`Pendientes de pago — deuda actual: $${deudaTotal.toFixed(2)}`}>
+      <Seccion titulo={`Pendientes de pago — deuda actual: ${formatearPesos(deudaTotal)}`}>
         <p className="text-xs text-frost-400 mb-2">
           Esta sección muestra la deuda vigente ahora mismo (no depende del período elegido arriba, solo del filtro de
           marca).
@@ -522,7 +523,7 @@ export default function EstadisticasPage() {
         {deudaPorCliente.length === 0 && <p className="text-sm text-frost-400">No hay pendientes de pago.</p>}
         <TablaSimple
           columnas={['Cliente', 'Monto adeudado', 'Pedidos']}
-          filas={deudaPorCliente.map((d) => [d.nombre, `$${d.monto.toFixed(2)}`, String(d.pedidos)])}
+          filas={deudaPorCliente.map((d) => [d.nombre, `${formatearPesos(d.monto)}`, String(d.pedidos)])}
         />
       </Seccion>
     </div>

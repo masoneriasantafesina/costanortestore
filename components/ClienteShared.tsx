@@ -12,6 +12,7 @@ import {
   colorSemaforo,
   type EstadisticasCliente,
 } from '@/lib/estadisticasCliente';
+import { formatearPesos } from '@/lib/formato';
 
 export function clienteVacio(estadoCliente: Cliente['estado_cliente']): Omit<Cliente, 'id' | 'creado_en'> {
   return {
@@ -110,7 +111,7 @@ export function FichaCliente({
                 (stats?.saldo ?? 0) > 0 ? 'text-red-600' : 'text-frost-800'
               }`}
             >
-              ${(stats?.saldo ?? 0).toFixed(2)}
+              {formatearPesos((stats?.saldo ?? 0))}
             </p>
           </div>
         </div>
@@ -324,7 +325,7 @@ export function FormularioCliente({
                   (stats?.saldo ?? 0) > 0 ? 'text-red-600' : 'text-frost-800'
                 }`}
               >
-                {cargandoStats ? '...' : `$${stats?.saldo.toFixed(2)}`}
+                {cargandoStats ? '...' : `${formatearPesos(stats?.saldo)}`}
               </p>
             </div>
           </div>
@@ -543,7 +544,7 @@ export function HistorialPedidosCliente({ cliente, onCerrar }: { cliente: Client
                   </span>
                   <span className="text-xs text-frost-500 flex-1 truncate">{etiquetaCobro(p)}</span>
                   <span className="text-xs text-frost-500 shrink-0">{kilosDe(p).toFixed(1)} kg</span>
-                  <span className="text-sm font-semibold text-frost-800 shrink-0">${p.total.toFixed(2)}</span>
+                  <span className="text-sm font-semibold text-frost-800 shrink-0">{formatearPesos(p.total)}</span>
                 </button>
 
                 {expandido && (
@@ -555,7 +556,7 @@ export function HistorialPedidosCliente({ cliente, onCerrar }: { cliente: Client
                           <span>
                             {item.cantidad} × {item.nombre_producto}
                           </span>
-                          <span>${item.subtotal.toFixed(2)}</span>
+                          <span>{formatearPesos(item.subtotal)}</span>
                         </div>
                       ))}
                     </div>

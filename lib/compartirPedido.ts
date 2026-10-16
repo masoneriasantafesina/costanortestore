@@ -1,4 +1,5 @@
 import type { Pedido } from '@/lib/types';
+import { formatearPesos } from '@/lib/formato';
 
 // Genera una imagen (PNG) del pedido, pensada para que una sucursal lo prepare,
 // y la comparte por WhatsApp (u otra app) desde el celular. En computadora, donde
@@ -45,10 +46,6 @@ function partirTexto(ctx: CanvasRenderingContext2D, texto: string, maxAncho: num
   }
   if (actual) lineas.push(actual);
   return lineas.length ? lineas : [''];
-}
-
-function formatearPesos(n: number) {
-  return `$${n.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 export async function generarImagenPedido(pedido: Pedido): Promise<Blob> {

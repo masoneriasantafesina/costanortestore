@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import type { Cliente, Cuota, Pedido } from '@/lib/types';
 import { registrarLog } from '@/lib/log';
+import { formatearPesos } from '@/lib/formato';
 
 type PedidoConCuotas = Pedido & { clientes: Cliente | null; cuotas: Cuota[] };
 
@@ -74,7 +75,7 @@ export default function CobranzasPage() {
       'registrar_pago_cuota',
       'pedido',
       pedido.id,
-      `Pedido #${pedido.numero} (${pedido.clientes?.nombre_apellido ?? pedido.nombre_contacto}): pago de $${monto.toFixed(2)} registrado el ${fecha}`
+      `Pedido #${pedido.numero} (${pedido.clientes?.nombre_apellido ?? pedido.nombre_contacto}): pago de ${formatearPesos(monto)} registrado el ${fecha}`
     );
 
     // Si con este pago quedaron todas las cuotas pagadas, el plan está completo:
@@ -220,7 +221,7 @@ function PlanCard({
             #{pedido.numero} · {pedido.clientes?.nombre_apellido ?? pedido.nombre_contacto}
           </p>
           <p className="text-xs text-frost-500 mt-0.5">
-            Total ${totalFinanciado.toFixed(2)} · {cuotasOrdenadas.length} cuotas
+            Total {formatearPesos(totalFinanciado)} · {cuotasOrdenadas.length} cuotas
             {!completado && proxima && (
               <> · próxima vence {new Date(proxima.fecha_vencimiento + 'T00:00:00').toLocaleDateString('es-AR')}</>
             )}
@@ -230,7 +231,7 @@ function PlanCard({
           {completado ? (
             <span className="text-xs font-semibold px-2 py-1 rounded-card bg-green-100 text-green-700">Saldado</span>
           ) : (
-            <p className="text-sm font-semibold text-frost-800">Saldo ${saldo.toFixed(2)}</p>
+            <p className="text-sm font-semibold text-frost-800">Saldo {formatearPesos(saldo)}</p>
           )}
         </div>
       </button>
@@ -245,7 +246,7 @@ function PlanCard({
                 </span>
                 <div className="flex items-center gap-2">
                   <span className="text-frost-500 text-xs">
-                    ${c.monto_pagado.toFixed(2)} / ${c.monto_programado.toFixed(2)}
+                    {formatearPesos(c.monto_pagado)} / {formatearPesos(c.monto_programado)}
                   </span>
                   <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-card ${ESTADO_CUOTA_ESTILO[c.estado]}`}>
                     {ESTADO_CUOTA_LABEL[c.estado]}
@@ -279,7 +280,7 @@ function PlanCard({
                   onClick={prefillCuotaCompleta}
                   className="text-xs font-medium text-frost-600 border border-frost-200 rounded-card px-2 py-1.5 hover:bg-white"
                 >
-                  Pagó esta cuota (${proxima ? (proxima.monto_programado - proxima.monto_pagado).toFixed(2) : '0.00'})
+                  Pagó esta cuota ({formatearPesos(proxima ? proxima.monto_programado - proxima.monto_pagado : 0)})
                 </button>
                 <button
                   onClick={enviar}

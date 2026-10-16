@@ -8,6 +8,7 @@ import { ESTADOS_LABEL, UNIDAD_NEGOCIO_LABEL, UNIDAD_NEGOCIO_COLOR, MARCA_PRODUC
 import { registrarLog } from '@/lib/log';
 import { compartirPedido, precargarLogoPedido } from '@/lib/compartirPedido';
 import { type CatalogoConfig, configPorDefecto, normalizarConfig, ordenarCategorias } from '@/lib/catalogo';
+import { formatearPesos } from '@/lib/formato';
 
 // Agrupa los productos de un pedido por categoría (en el orden del catálogo) y suma
 // las unidades pedidas de cada una. Los productos sin categoría van al final.
@@ -165,7 +166,7 @@ export default function PedidosPage() {
       'activar_plan_cuotas',
       'pedido',
       pedido.id,
-      `Pedido #${pedido.numero}: plan de ${cantidadCuotas} cuotas activado, $${montoBase.toFixed(2)} aprox. c/u, desde ${fechaInicio}`
+      `Pedido #${pedido.numero}: plan de ${cantidadCuotas} cuotas activado, ${formatearPesos(montoBase)} aprox. c/u, desde ${fechaInicio}`
     );
     await cargarTodo();
   }
@@ -195,7 +196,7 @@ export default function PedidosPage() {
       'editar_items_pedido',
       'pedido',
       pedido.id,
-      `Pedido #${pedido.numero}: total anterior $${pedido.total.toFixed(2)} → nuevo $${total.toFixed(2)}, ${items.length} ítem(s)`
+      `Pedido #${pedido.numero}: total anterior ${formatearPesos(pedido.total)} → nuevo ${formatearPesos(total)}, ${items.length} ítem(s)`
     );
     await cargarTodo();
   }
@@ -345,7 +346,7 @@ export default function PedidosPage() {
                     #{p.numero} · {p.clientes?.nombre_apellido ?? p.nombre_contacto}
                   </p>
                   <p className="text-xs text-frost-500">
-                    ${p.total.toFixed(2)} · entregado el {new Date(p.actualizado_en).toLocaleString('es-AR')}
+                    {formatearPesos(p.total)} · entregado el {new Date(p.actualizado_en).toLocaleString('es-AR')}
                   </p>
                   {p.cajon && (
                     <span className="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-card mt-1 bg-blue-100 text-blue-700">
@@ -386,7 +387,7 @@ export default function PedidosPage() {
                     #{p.numero} · {p.clientes?.nombre_apellido ?? p.nombre_contacto}
                   </p>
                   <p className="text-xs text-frost-500">
-                    ${p.total.toFixed(2)} · cancelado el{' '}
+                    {formatearPesos(p.total)} · cancelado el{' '}
                     {new Date(p.actualizado_en).toLocaleString('es-AR')}
                   </p>
                 </div>
@@ -460,7 +461,7 @@ export default function PedidosPage() {
                         #{p.numero} · {p.clientes?.nombre_apellido ?? p.nombre_contacto}
                       </p>
                       <p className="text-xs text-frost-500 mt-1">
-                        {p.origen === 'catalogo_web' ? 'Catálogo web' : 'Carga manual'} · ${p.total.toFixed(2)}
+                        {p.origen === 'catalogo_web' ? 'Catálogo web' : 'Carga manual'} · {formatearPesos(p.total)}
                       </p>
                       <div className="flex flex-wrap gap-1 mt-1">
                         {p.clientes?.unidad_negocio ? (
@@ -508,7 +509,7 @@ export default function PedidosPage() {
                 <p className="text-sm font-medium text-yellow-900">
                   #{p.numero} · {p.clientes?.nombre_apellido ?? p.nombre_contacto}
                 </p>
-                <p className="text-xs text-yellow-700 mt-1">${p.total.toFixed(2)}</p>
+                <p className="text-xs text-yellow-700 mt-1">{formatearPesos(p.total)}</p>
                 <div className="flex flex-wrap gap-1 mt-1">
                   {p.clientes?.unidad_negocio && (
                     <span
@@ -888,7 +889,7 @@ function DetallePedido({
                           <span>
                             {item.cantidad} × {item.nombre_producto}
                           </span>
-                          <span>${item.subtotal.toFixed(2)}</span>
+                          <span>{formatearPesos(item.subtotal)}</span>
                         </div>
                       ))}
                     </div>
@@ -897,7 +898,7 @@ function DetallePedido({
               </div>
               <div className="flex justify-between text-sm font-semibold text-frost-800 border-t border-frost-100 mt-2 pt-2">
                 <span>Total</span>
-                <span>${pedido.total.toFixed(2)}</span>
+                <span>{formatearPesos(pedido.total)}</span>
               </div>
               <div className="flex justify-between text-xs text-frost-400 mt-1">
                 <span>Peso total</span>
@@ -928,7 +929,7 @@ function DetallePedido({
                     >
                       +
                     </button>
-                    <span className="text-xs text-frost-600 w-16 text-right">${it.subtotal.toFixed(2)}</span>
+                    <span className="text-xs text-frost-600 w-16 text-right">{formatearPesos(it.subtotal)}</span>
                     <button
                       onClick={() => quitarItem(it.id)}
                       className="text-red-500 text-xs px-1"
@@ -945,7 +946,7 @@ function DetallePedido({
 
               <div className="flex justify-between text-sm font-semibold text-frost-800 border-t border-frost-200 pt-2 mb-3">
                 <span>Total</span>
-                <span>${totalEdit.toFixed(2)}</span>
+                <span>{formatearPesos(totalEdit)}</span>
               </div>
 
               <input
@@ -963,7 +964,7 @@ function DetallePedido({
                     className="w-full flex justify-between text-left text-xs bg-white hover:bg-frost-100 rounded-card px-2 py-1.5"
                   >
                     <span>{p.nombre}</span>
-                    <span className="text-frost-500">${(p.precio_promo ?? p.precio_normal).toFixed(2)}</span>
+                    <span className="text-frost-500">{formatearPesos((p.precio_promo ?? p.precio_normal))}</span>
                   </button>
                 ))}
                 {productosDisponibles !== null && productosFiltrados.length === 0 && (
@@ -1040,7 +1041,7 @@ function DetallePedido({
                 />
               </div>
               <p className="text-xs text-frost-400">
-                Cada cuota sería de ${(pedido.total / cantidadCuotas).toFixed(2)} aprox., una por semana.
+                Cada cuota sería de {formatearPesos((pedido.total / cantidadCuotas))} aprox., una por semana.
               </p>
               <div className="flex justify-end gap-2 pt-1">
                 <button onClick={() => setFormCuotasAbierto(false)} className="px-3 py-1.5 text-xs text-frost-500">

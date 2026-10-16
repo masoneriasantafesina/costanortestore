@@ -7,6 +7,7 @@ import type { Producto } from '@/lib/types';
 import { MARCA_PRODUCTO_LABEL } from '@/lib/types';
 import { registrarLog } from '@/lib/log';
 import SubidaFoto from '@/components/SubidaFoto';
+import { formatearPesos } from '@/lib/formato';
 
 const VACIO: Omit<Producto, 'id'> = {
   nombre: '',
@@ -145,7 +146,7 @@ export default function ProductosPage() {
               </div>
               <div className="p-3">
                 <p className="text-sm font-medium text-frost-800">{p.nombre}</p>
-                <p className="text-xs text-frost-500">${p.precio_normal.toFixed(2)}</p>
+                <p className="text-xs text-frost-500">{formatearPesos(p.precio_normal)}</p>
                 <div className="flex gap-1 mt-2">
                   <span
                     className={`text-[10px] px-2 py-0.5 rounded-card ${
@@ -212,7 +213,7 @@ function FormularioProducto({
         'editar_producto',
         'producto',
         producto.id,
-        `Producto "${form.nombre}" editado (precio: $${form.precio_normal})`
+        `Producto "${form.nombre}" editado (precio: ${formatearPesos(form.precio_normal)})`
       );
     } else {
       const { data: creado, error } = await supabase.from('productos').insert(form).select().single();
@@ -225,7 +226,7 @@ function FormularioProducto({
         'crear_producto',
         'producto',
         creado?.id ?? null,
-        `Producto "${form.nombre}" creado (precio: $${form.precio_normal})`
+        `Producto "${form.nombre}" creado (precio: ${formatearPesos(form.precio_normal)})`
       );
     }
     onGuardado();

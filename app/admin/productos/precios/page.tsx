@@ -6,6 +6,7 @@ import { supabase } from '@/lib/supabase/client';
 import type { Producto } from '@/lib/types';
 import { MARCA_PRODUCTO_LABEL } from '@/lib/types';
 import { registrarLog } from '@/lib/log';
+import { formatearPesos } from '@/lib/formato';
 
 type Fila = {
   id: string;
@@ -123,7 +124,7 @@ export default function PreciosPage() {
           'editar_precio',
           'producto',
           p.id,
-          `Producto "${p.nombre}" (edición masiva): precio $${o.precio_normal} → $${f.precio_normal}` +
+          `Producto "${p.nombre}" (edición masiva): precio ${formatearPesos(o.precio_normal)} → ${formatearPesos(f.precio_normal)}` +
             (o.peso_kg !== f.peso_kg ? `, peso ${o.peso_kg ?? 0}kg → ${f.peso_kg ?? 0}kg` : '')
         );
       })
