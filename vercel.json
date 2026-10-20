@@ -1,5 +1,8 @@
 {
   "git": {
     "deploymentEnabled": false
-  }
+  },
+  "crons": [
+    { "path": "/api/keepalive", "schedule": "0 12 */3 * *" }
+  ]
 }
