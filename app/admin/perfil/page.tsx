@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
+import NotificacionesPedidos from '@/components/NotificacionesPedidos';
 
 type MiPerfil = {
   id: string;
@@ -193,12 +194,7 @@ export default function PerfilPage() {
         </form>
       </div>
 
-      <div className="bg-frost-50 border border-frost-200 rounded-card p-4 mt-5">
-        <p className="text-sm text-frost-600 font-medium mb-1">Notificaciones al celular</p>
-        <p className="text-xs text-frost-500">
-          Todavía no están disponibles — quedaron para una próxima actualización.
-        </p>
-      </div>
+      <NotificacionesPedidos />
     </div>
   );
 }

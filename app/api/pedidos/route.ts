@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 import { formatearPesos } from '@/lib/formato';
 import { MENSAJE_CERRADO_DEFECTO } from '@/lib/catalogo';
+import { notificarSuscriptos } from '@/lib/webpush';
 
 // Esta ruta corre en el servidor (nunca en el navegador), así que puede usar
 // la service_role key con seguridad. La necesitamos porque el rol público
@@ -143,6 +144,17 @@ export async function POST(req: Request) {
     entidad_id: pedido.id,
     detalle: `Pedido #${pedido.numero} desde el catálogo (${marca === 'via_vana' ? 'Via Vana' : 'Grido'}), total ${formatearPesos(total)}`,
   });
+
+  // Aviso al celular de quienes activaron las notificaciones. Si falla o tarda,
+  // no afecta al cliente: el pedido ya quedó guardado.
+  try {
+    await Promise.race([
+      notificarSuscriptos(supabase),
+      new Promise((resolve) => setTimeout(resolve, 4000)),
+    ]);
+  } catch (e) {
+    console.error('No se pudo enviar la notificación', e);
+  }
 
   return NextResponse.json({ pedido }, { status: 201 });
 }
