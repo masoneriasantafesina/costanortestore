@@ -39,12 +39,14 @@ export function FichaCliente({
   onCerrar,
   onEditar,
   onVerHistorial,
+  onCancelarSolicitud,
 }: {
   cliente: Cliente;
   stats: EstadisticasCliente | undefined;
   onCerrar: () => void;
   onEditar: () => void;
   onVerHistorial: () => void;
+  onCancelarSolicitud?: () => void;
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
@@ -171,6 +173,14 @@ export function FichaCliente({
             Editar cliente
           </button>
         </div>
+        {onCancelarSolicitud && (
+          <button
+            onClick={onCancelarSolicitud}
+            className="mt-2 w-full text-sm font-medium text-red-600 border border-red-200 rounded-card px-3 py-2 hover:bg-red-50"
+          >
+            Cancelar solicitud
+          </button>
+        )}
       </div>
     </div>
   );
