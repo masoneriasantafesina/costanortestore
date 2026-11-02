@@ -32,7 +32,20 @@ export default function CobranzasPage() {
       .select('*, clientes(*), cuotas(*)')
       .eq('financiado_cuotas', true)
       .order('creado_en', { ascending: false });
-    setPlanes((data as any) ?? []);
+    const lista = ((data as any) ?? []) as PedidoConCuotas[];
+    // Autocorrección: si un plan tiene todas las cuotas pagadas pero el pedido
+    // quedó sin marcar como pagado, lo marcamos.
+    const sinMarcar = lista.filter(
+      (p) => !p.pagado && p.cuotas.length > 0 && p.cuotas.every((c) => c.estado === 'pagada')
+    );
+    for (const p of sinMarcar) {
+      const { error } = await supabase
+        .from('pedidos')
+        .update({ pagado: true, actualizado_en: new Date().toISOString() })
+        .eq('id', p.id);
+      if (!error) p.pagado = true;
+    }
+    setPlanes(lista);
     setCargando(false);
   }
 
@@ -57,7 +70,7 @@ export default function CobranzasPage() {
       restante -= aplicado;
     }
 
-    await Promise.all(
+    const resultados = await Promise.all(
       actualizaciones.map((u) =>
         supabase
           .from('cuotas')
@@ -70,6 +83,12 @@ export default function CobranzasPage() {
           .eq('id', u.id)
       )
     );
+    const falla = resultados.find((r) => r.error);
+    if (falla?.error) {
+      alert(`No se pudo guardar el pago: ${falla.error.message}`);
+      await cargar();
+      return;
+    }
 
     await registrarLog(
       'registrar_pago_cuota',

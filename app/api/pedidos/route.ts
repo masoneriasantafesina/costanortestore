@@ -110,6 +110,24 @@ export async function POST(req: Request) {
     );
   }
 
+  // Anti-duplicados: si el mismo teléfono ya mandó un pedido idéntico (misma marca
+  // y mismo total) hace menos de 3 minutos, es un doble toque o un reintento:
+  // devolvemos el que ya existe en vez de crear otro.
+  const desde = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+  const { data: previo } = await supabase
+    .from('pedidos')
+    .select()
+    .eq('origen', 'catalogo_web')
+    .eq('marca', marca)
+    .eq('telefono_contacto', telefono_contacto)
+    .eq('total', total)
+    .gte('creado_en', desde)
+    .order('creado_en', { ascending: false })
+    .limit(1);
+  if (previo && previo.length > 0) {
+    return NextResponse.json({ pedido: previo[0] }, { status: 201 });
+  }
+
   const { data: pedido, error: errorPedido } = await supabase
     .from('pedidos')
     .insert({
@@ -150,7 +168,7 @@ export async function POST(req: Request) {
   try {
     await Promise.race([
       notificarSuscriptos(supabase),
-      new Promise((resolve) => setTimeout(resolve, 4000)),
+      new Promise((resolve) => setTimeout(resolve, 2500)),
     ]);
   } catch (e) {
     console.error('No se pudo enviar la notificación', e);

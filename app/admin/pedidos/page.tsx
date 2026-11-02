@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import type { Cliente, EstadoPedido, Pedido, PedidoItem, Producto } from '@/lib/types';
 import Link from 'next/link';
@@ -49,9 +49,16 @@ export default function PedidosPage() {
   // Para mostrar los productos del pedido agrupados por categoría.
   const [categoriaPorProducto, setCategoriaPorProducto] = useState<Record<string, string>>({});
   const [configsCatalogo, setConfigsCatalogo] = useState<Record<string, CatalogoConfig>>({});
+  const [busquedaEntregados, setBusquedaEntregados] = useState('');
+  const [busquedaCancelados, setBusquedaCancelados] = useState('');
+  const [actualizando, setActualizando] = useState(false);
+  const [tirando, setTirando] = useState(0);
+  const primeraCarga = useRef(true);
 
   async function cargarTodo() {
-    setCargando(true);
+    // La primera vez mostramos "Cargando..."; después refrescamos en silencio
+    // para que el tablero no desaparezca ni salte al actualizar.
+    if (primeraCarga.current) setCargando(true);
     const [{ data: pedidosData }, { data: clientesData }, { data: productosCat }, { data: configsData }] =
       await Promise.all([
         supabase
@@ -81,11 +88,66 @@ export default function PedidosPage() {
       if (!prev) return prev;
       return (pedidosData as any)?.find((p: any) => p.id === prev.id) ?? null;
     });
+    primeraCarga.current = false;
     setCargando(false);
   }
 
+  async function actualizarManual() {
+    if (actualizando) return;
+    setActualizando(true);
+    try {
+      await cargarTodo();
+    } finally {
+      setActualizando(false);
+    }
+  }
+  const actualizarRef = useRef(actualizarManual);
+  actualizarRef.current = actualizarManual;
+
   useEffect(() => {
     cargarTodo();
+  }, []);
+
+  // Al volver a la app (típico en iPhone, donde la app instalada queda en segundo plano) se refresca sola.
+  useEffect(() => {
+    function alVolver() {
+      if (document.visibilityState === 'visible') actualizarRef.current();
+    }
+    document.addEventListener('visibilitychange', alVolver);
+    return () => document.removeEventListener('visibilitychange', alVolver);
+  }, []);
+
+  // iPhone/iPad no traen "deslizar para actualizar" en apps instaladas: lo armamos acá.
+  useEffect(() => {
+    const esIOS =
+      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (!esIOS) return;
+    let inicioY: number | null = null;
+    let distancia = 0;
+    const onStart = (e: TouchEvent) => {
+      inicioY = window.scrollY <= 0 ? e.touches[0].clientY : null;
+      distancia = 0;
+    };
+    const onMove = (e: TouchEvent) => {
+      if (inicioY === null) return;
+      distancia = Math.max(0, e.touches[0].clientY - inicioY);
+      setTirando(Math.min(distancia, 90));
+    };
+    const onEnd = () => {
+      if (inicioY !== null && distancia > 80) actualizarRef.current();
+      inicioY = null;
+      distancia = 0;
+      setTirando(0);
+    };
+    document.addEventListener('touchstart', onStart, { passive: true });
+    document.addEventListener('touchmove', onMove, { passive: true });
+    document.addEventListener('touchend', onEnd, { passive: true });
+    return () => {
+      document.removeEventListener('touchstart', onStart);
+      document.removeEventListener('touchmove', onMove);
+      document.removeEventListener('touchend', onEnd);
+    };
   }, []);
 
   async function cambiarEstado(pedido: Pedido, estado: EstadoPedido) {
@@ -222,6 +284,48 @@ export default function PedidosPage() {
     await cargarTodo();
   }
 
+  // Para planes de cuotas que el cliente terminó pagando todo junto: deja todas las
+  // cuotas como pagadas y el pedido como cobrado.
+  async function saldarPlanCuotas(pedido: Pedido) {
+    const hoy = new Date().toISOString().slice(0, 10);
+    const { data: cuotas, error } = await supabase.from('cuotas').select('*').eq('pedido_id', pedido.id);
+    if (error) {
+      alert(`No se pudieron leer las cuotas: ${error.message}`);
+      return;
+    }
+    for (const c of (cuotas as any[]) ?? []) {
+      if (c.estado === 'pagada') continue;
+      const { error: errorCuota } = await supabase
+        .from('cuotas')
+        .update({
+          monto_pagado: c.monto_programado,
+          estado: 'pagada',
+          fecha_pago: hoy,
+          actualizado_en: new Date().toISOString(),
+        })
+        .eq('id', c.id);
+      if (errorCuota) {
+        alert(`No se pudo actualizar la cuota ${c.numero}: ${errorCuota.message}`);
+        return;
+      }
+    }
+    const { error: errorPedido } = await supabase
+      .from('pedidos')
+      .update({ pagado: true, actualizado_en: new Date().toISOString() })
+      .eq('id', pedido.id);
+    if (errorPedido) {
+      alert(`No se pudo marcar el pedido como pagado: ${errorPedido.message}`);
+      return;
+    }
+    await registrarLog(
+      'registrar_pago_cuota',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: plan de cuotas saldado de una vez, pedido marcado como pagado`
+    );
+    await cargarTodo();
+  }
+
   async function reabrirPedido(pedido: Pedido) {
     await supabase.from('pedidos').update({ estado: 'nuevo' }).eq('id', pedido.id);
     await cargarTodo();
@@ -299,8 +403,21 @@ export default function PedidosPage() {
 
   const pedidosFiltrados = pedidos.filter((p) => filtroMarca === 'todas' || p.marca === filtroMarca);
 
+  const coincide = (p: Pedido, texto: string) => {
+    const q = texto.trim().toLowerCase().replace(/^#/, '');
+    if (!q) return true;
+    const campos = [
+      String(p.numero),
+      p.clientes?.nombre_apellido,
+      p.nombre_contacto,
+      p.telefono_contacto,
+      p.direccion_contacto,
+    ];
+    return campos.some((c) => (c ?? '').toLowerCase().includes(q));
+  };
+
   const cancelados = pedidosFiltrados
-    .filter((p) => p.estado === 'cancelado')
+    .filter((p) => p.estado === 'cancelado' && coincide(p, busquedaCancelados))
     .sort((a, b) => new Date(b.actualizado_en).getTime() - new Date(a.actualizado_en).getTime());
 
   const pendientesPago = pedidosFiltrados
@@ -308,14 +425,26 @@ export default function PedidosPage() {
     .sort((a, b) => new Date(a.actualizado_en).getTime() - new Date(b.actualizado_en).getTime());
 
   const entregadosHistorial = pedidosFiltrados
-    .filter((p) => p.estado === 'entregado' && p.pagado)
+    .filter((p) => p.estado === 'entregado' && p.pagado && coincide(p, busquedaEntregados))
     .sort((a, b) => new Date(b.actualizado_en).getTime() - new Date(a.actualizado_en).getTime());
 
   return (
     <div className="max-w-full overflow-x-hidden">
+      {(tirando > 0 || actualizando) && (
+        <p className="text-center text-xs text-frost-500 mb-2" style={{ height: actualizando ? 16 : Math.max(16, tirando / 3) }}>
+          {actualizando ? 'Actualizando...' : tirando > 80 ? 'Soltá para actualizar' : '↓ Seguí bajando para actualizar'}
+        </p>
+      )}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
         <h1 className="font-display text-2xl text-frost-800">Pedidos</h1>
         <div className="flex gap-2 flex-wrap">
+          <button
+            onClick={actualizarManual}
+            disabled={actualizando}
+            className="text-sm font-medium text-frost-600 border border-frost-200 rounded-card px-3 py-1.5 hover:bg-frost-50 disabled:opacity-60"
+          >
+            {actualizando ? 'Actualizando...' : '↻ Actualizar'}
+          </button>
           <button
             onClick={() => setMostrarEntregados((v) => !v)}
             className="text-sm font-medium text-frost-600 border border-frost-200 rounded-card px-3 py-1.5 hover:bg-frost-50"
@@ -352,8 +481,17 @@ export default function PedidosPage() {
           <p className="text-xs font-semibold uppercase tracking-wide text-frost-500 mb-3">
             Pedidos entregados y cobrados
           </p>
+          <input
+            type="search"
+            className="input-field mb-3"
+            placeholder="Buscar por número, nombre, teléfono o dirección"
+            value={busquedaEntregados}
+            onChange={(e) => setBusquedaEntregados(e.target.value)}
+          />
           {entregadosHistorial.length === 0 && (
-            <p className="text-sm text-frost-400">Todavía no hay pedidos entregados y cobrados.</p>
+            <p className="text-sm text-frost-400">
+              {busquedaEntregados.trim() ? 'No hay entregados que coincidan con la búsqueda.' : 'Todavía no hay pedidos entregados y cobrados.'}
+            </p>
           )}
           <div className="space-y-2">
             {entregadosHistorial.map((p) => (
@@ -392,11 +530,22 @@ export default function PedidosPage() {
                 onClick={eliminarTodosCancelados}
                 className="text-xs font-medium text-red-600 border border-red-200 rounded-card px-2 py-1 hover:bg-red-50"
               >
-                Borrar todos ({cancelados.length})
+                {busquedaCancelados.trim() ? `Borrar estos (${cancelados.length})` : `Borrar todos (${cancelados.length})`}
               </button>
             )}
           </div>
-          {cancelados.length === 0 && <p className="text-sm text-frost-400">No hay pedidos cancelados.</p>}
+          <input
+            type="search"
+            className="input-field mb-3"
+            placeholder="Buscar por número, nombre, teléfono o dirección"
+            value={busquedaCancelados}
+            onChange={(e) => setBusquedaCancelados(e.target.value)}
+          />
+          {cancelados.length === 0 && (
+            <p className="text-sm text-frost-400">
+              {busquedaCancelados.trim() ? 'No hay cancelados que coincidan con la búsqueda.' : 'No hay pedidos cancelados.'}
+            </p>
+          )}
           <div className="space-y-2">
             {cancelados.map((p) => (
               <div
@@ -571,6 +720,7 @@ export default function PedidosPage() {
           onActualizarCajon={actualizarCajon}
           onGuardarItems={guardarItemsPedido}
           onActivarCuotas={activarPlanCuotas}
+          onSaldarPlan={saldarPlanCuotas}
         />
       )}
     </div>
@@ -590,6 +740,7 @@ function DetallePedido({
   onActualizarCajon,
   onGuardarItems,
   onActivarCuotas,
+  onSaldarPlan,
 }: {
   pedido: Pedido;
   clientes: Cliente[];
@@ -602,6 +753,7 @@ function DetallePedido({
   onActualizarCobro: (p: Pedido, metodo: string, pagado: boolean) => void;
   onActualizarCajon: (p: Pedido, cajon: string) => void;
   onActivarCuotas: (p: Pedido, cantidadCuotas: number, fechaInicio: string) => Promise<void>;
+  onSaldarPlan: (p: Pedido) => Promise<void>;
   onGuardarItems: (
     p: Pedido,
     items: {
@@ -1092,6 +1244,16 @@ function DetallePedido({
               Este pedido se cobra por cuotas, no tiene una forma de cobro única. Va a figurar en "Pendiente de
               Pago" hasta que termine de pagar todas las cuotas desde Cobranzas — ahí pasa a pagado solo.
             </p>
+            {!pedido.pagado && (
+              <button
+                onClick={() => {
+                  if (confirm('¿Marcar todas las cuotas como pagadas y el pedido como cobrado?')) onSaldarPlan(pedido);
+                }}
+                className="mt-2 text-sm font-medium text-green-700 border border-green-200 bg-green-50 rounded-card px-3 py-2 hover:bg-green-100"
+              >
+                Pagó todo junto: marcar como pagado
+              </button>
+            )}
           </div>
         ) : (
           <div className="mb-4">

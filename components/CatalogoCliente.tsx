@@ -60,6 +60,7 @@ export default function CatalogoCliente({
   const [carritoAbierto, setCarritoAbierto] = useState(false);
   const [detalle, setDetalle] = useState<Producto | null>(null);
   const [enviando, setEnviando] = useState(false);
+  const enviandoRef = useRef(false);
   const [enviado, setEnviado] = useState(false);
   const [resumenParaWhatsapp, setResumenParaWhatsapp] = useState<string | null>(null);
   const [form, setForm] = useState({ nombre: '', telefono: '', direccion: '' });
@@ -213,11 +214,13 @@ export default function CatalogoCliente({
 
   async function confirmarPedido(e: React.FormEvent) {
     e.preventDefault();
+    if (enviandoRef.current) return;
     if (itemsCarrito.length === 0) return;
     if (faltaParaMinimo > 0) {
       alert(`El pedido mínimo es de ${formatearPesos(config.monto_minimo)}. Te faltan ${formatearPesos(faltaParaMinimo)}.`);
       return;
     }
+    enviandoRef.current = true;
     setEnviando(true);
 
     // Los navegadores (sobre todo en celular) bloquean abrir una pestaña nueva
@@ -248,13 +251,15 @@ export default function CatalogoCliente({
       });
     } catch {
       ventanaWhatsapp?.close();
+      enviandoRef.current = false;
       setEnviando(false);
       alert('No se pudo enviar el pedido. Revisá tu conexión e intentá de nuevo.');
       return;
     }
 
-    setEnviando(false);
     if (!res.ok) {
+      enviandoRef.current = false;
+      setEnviando(false);
       ventanaWhatsapp?.close();
       // Los errores 4xx traen un mensaje pensado para el cliente (cerrado,
       // sin stock, monto mínimo...). Los demás son fallas técnicas.
@@ -294,6 +299,8 @@ export default function CatalogoCliente({
     setResumenParaWhatsapp(mensaje);
     setEnviado(true);
     setCarrito({});
+    enviandoRef.current = false;
+    setEnviando(false);
 
     if (numeroWhatsapp) {
       const urlWhatsapp = `https://wa.me/${numeroWhatsapp}?text=${encodeURIComponent(mensaje)}`;
