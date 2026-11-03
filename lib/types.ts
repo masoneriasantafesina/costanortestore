@@ -124,6 +124,11 @@ export type Pedido = {
   reporte_nota?: string | null;
   reporte_en?: string | null;
   reporte_rechazo?: string | null;
+  reporte_pagos?: { metodo: string; monto: number }[] | null;
+  pagos?: { metodo: string; monto: number }[] | null;
+  comprobantes?: string[] | null;
+  cargado_facturacion?: boolean | null;
+  cargado_en?: string | null;
   clientes?: Cliente | null;
   pedido_items?: PedidoItem[];
 };

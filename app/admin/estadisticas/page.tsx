@@ -227,6 +227,11 @@ export default function EstadisticasPage() {
   const metodosPago = useMemo(() => {
     const mapa = new Map<string, number>();
     for (const p of ventasPeriodo) {
+      if (p.metodo_pago === 'mixto' && Array.isArray(p.pagos) && p.pagos.length > 0) {
+        // Cobro dividido: cada parte va a su forma de pago.
+        for (const parte of p.pagos) mapa.set(parte.metodo, (mapa.get(parte.metodo) ?? 0) + parte.monto);
+        continue;
+      }
       const clave = p.metodo_pago ?? 'sin_definir';
       mapa.set(clave, (mapa.get(clave) ?? 0) + p.total);
     }

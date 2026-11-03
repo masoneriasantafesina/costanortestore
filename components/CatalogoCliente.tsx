@@ -293,7 +293,11 @@ export default function CatalogoCliente({
     const mensaje = [
       `Pedido de ${form.nombre}`,
       `Tel: ${form.telefono}`,
-      tipoEntrega === 'retiro' ? `Retira en: ${textoSucursal(sucursal)}` : form.direccion ? `Dirección: ${form.direccion}` : null,
+      tipoEntrega === 'retiro'
+        ? `RETIRA en sucursal: ${textoSucursal(sucursal)}`
+        : form.direccion
+        ? `Te lo llevamos. Dirección: ${form.direccion}`
+        : 'Te lo llevamos',
       '',
       ...lineas,
       '',

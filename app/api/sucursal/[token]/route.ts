@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 import { COBROS_SUCURSAL, textoSucursal } from '@/lib/sucursales';
+import { describirPagos, validarPagos } from '@/lib/pagos';
 
 export const dynamic = 'force-dynamic';
 
@@ -46,6 +47,8 @@ export async function GET(_req: Request, { params }: { params: { token: string }
     })),
     reporte_estado: p.reporte_estado,
     reporte_metodo_pago: p.reporte_metodo_pago,
+    reporte_pagos: p.reporte_pagos ?? null,
+    comprobantes: Array.isArray(p.comprobantes) ? p.comprobantes.length : 0,
     reporte_rechazo: p.reporte_estado === 'rechazado' ? p.reporte_rechazo : null,
   });
 }
@@ -57,8 +60,9 @@ export async function POST(req: Request, { params }: { params: { token: string }
   } catch {
     return NextResponse.json({ error: 'Datos inválidos.' }, { status: 400 });
   }
-  const metodo = String(body?.metodo_pago ?? '');
-  if (!COBROS_SUCURSAL.some((c) => c.id === metodo)) {
+  const dividido = Array.isArray(body?.pagos);
+  const metodo = dividido ? 'mixto' : String(body?.metodo_pago ?? '');
+  if (!dividido && !COBROS_SUCURSAL.some((c) => c.id === metodo)) {
     return NextResponse.json({ error: 'Elegí cómo pagó el cliente.' }, { status: 400 });
   }
   const por = String(body?.por ?? '').trim().slice(0, 60);
@@ -75,6 +79,17 @@ export async function POST(req: Request, { params }: { params: { token: string }
     return NextResponse.json({ error: 'Este pedido ya fue cerrado.' }, { status: 409 });
   }
 
+  let pagos = null as ReturnType<typeof validarPagos>;
+  if (dividido) {
+    pagos = validarPagos(body.pagos, Number(p.total));
+    if (!pagos) {
+      return NextResponse.json(
+        { error: 'Los dos montos tienen que ser de formas de pago distintas y sumar el total del pedido.' },
+        { status: 400 }
+      );
+    }
+  }
+
   // Solo se acepta si nadie lo informó antes (o si fue rechazado y hay que volver a informarlo).
   // El filtro va en la propia actualización para que dos toques a la vez no se pisen.
   const { data: actualizado, error } = await supabase
@@ -82,6 +97,7 @@ export async function POST(req: Request, { params }: { params: { token: string }
     .update({
       reporte_estado: 'pendiente',
       reporte_metodo_pago: metodo,
+      reporte_pagos: pagos,
       reporte_por: por,
       reporte_nota: nota || null,
       reporte_en: new Date().toISOString(),
@@ -103,7 +119,7 @@ export async function POST(req: Request, { params }: { params: { token: string }
     accion: 'informar_entrega_sucursal',
     entidad: 'pedido',
     entidad_id: p.id,
-    detalle: `Pedido #${p.numero}: ${por} informó entrega y cobro (${metodo}) desde la sucursal`,
+    detalle: `Pedido #${p.numero}: ${por} informó entrega y cobro (${pagos ? describirPagos(pagos) : metodo}) desde la sucursal`,
   });
 
   return NextResponse.json({ ok: true });

@@ -10,6 +10,8 @@ import { compartirPedido, precargarLogoPedido } from '@/lib/compartirPedido';
 import { type CatalogoConfig, configPorDefecto, normalizarConfig, ordenarCategorias } from '@/lib/catalogo';
 import { formatearPesos } from '@/lib/formato';
 import { COBROS_SUCURSAL, buscarSucursal } from '@/lib/sucursales';
+import CobroDividido from '@/components/CobroDividido';
+import { describirPagos, type PagoParte } from '@/lib/pagos';
 
 // Agrupa los productos de un pedido por categoría (en el orden del catálogo) y suma
 // las unidades pedidas de cada una. Los productos sin categoría van al final.
@@ -52,6 +54,7 @@ export default function PedidosPage() {
   const [configsCatalogo, setConfigsCatalogo] = useState<Record<string, CatalogoConfig>>({});
   const [busquedaEntregados, setBusquedaEntregados] = useState('');
   const [busquedaCancelados, setBusquedaCancelados] = useState('');
+  const [filtroCargado, setFiltroCargado] = useState<'todos' | 'sin_cargar' | 'cargados'>('todos');
   const [actualizando, setActualizando] = useState(false);
   const [tirando, setTirando] = useState(0);
   const primeraCarga = useRef(true);
@@ -200,7 +203,7 @@ export default function PedidosPage() {
   async function actualizarCobro(pedido: Pedido, metodo: string, pagado: boolean) {
     const { error } = await supabase
       .from('pedidos')
-      .update({ metodo_pago: metodo || null, pagado })
+      .update({ metodo_pago: metodo || null, pagado, pagos: null })
       .eq('id', pedido.id);
     if (error) {
       alert('No se pudo guardar la forma de cobro: ' + error.message);
@@ -212,6 +215,43 @@ export default function PedidosPage() {
       'pedido',
       pedido.id,
       `Pedido #${pedido.numero}: método "${metodo || 'sin definir'}", pagado: ${pagado ? 'sí' : 'no'}`
+    );
+    await cargarTodo();
+  }
+
+  async function actualizarCobroDividido(pedido: Pedido, pagos: PagoParte[]) {
+    const { error } = await supabase
+      .from('pedidos')
+      .update({ metodo_pago: 'mixto', pagado: true, pagos })
+      .eq('id', pedido.id);
+    if (error) {
+      alert('No se pudo guardar el cobro: ' + error.message);
+      await cargarTodo();
+      return;
+    }
+    await registrarLog(
+      'actualizar_cobro',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: cobro dividido, ${describirPagos(pagos)}`
+    );
+    await cargarTodo();
+  }
+
+  async function marcarCargado(pedido: Pedido, cargado: boolean) {
+    const { error } = await supabase
+      .from('pedidos')
+      .update({ cargado_facturacion: cargado, cargado_en: cargado ? new Date().toISOString() : null })
+      .eq('id', pedido.id);
+    if (error) {
+      alert('No se pudo actualizar la marca de facturación: ' + error.message);
+      return;
+    }
+    await registrarLog(
+      cargado ? 'marcar_cargado_facturacion' : 'desmarcar_cargado_facturacion',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: ${cargado ? 'cargado' : 'desmarcado como cargado'} en el sistema de facturación`
     );
     await cargarTodo();
   }
@@ -339,6 +379,7 @@ export default function PedidosPage() {
       .update({
         estado: 'entregado',
         metodo_pago: metodo,
+        pagos: metodo === 'mixto' ? pedido.reporte_pagos ?? null : null,
         pagado: metodo !== 'pendiente_pago',
         reporte_estado: null,
         actualizado_en: new Date().toISOString(),
@@ -482,6 +523,7 @@ export default function PedidosPage() {
 
   const entregadosHistorial = pedidosFiltrados
     .filter((p) => p.estado === 'entregado' && p.pagado && coincide(p, busquedaEntregados))
+    .filter((p) => filtroCargado === 'todos' || (filtroCargado === 'cargados' ? p.cargado_facturacion : !p.cargado_facturacion))
     .sort((a, b) => new Date(b.actualizado_en).getTime() - new Date(a.actualizado_en).getTime());
 
   return (
@@ -544,6 +586,19 @@ export default function PedidosPage() {
             value={busquedaEntregados}
             onChange={(e) => setBusquedaEntregados(e.target.value)}
           />
+          <div className="flex gap-2 mb-3 flex-wrap">
+            {([['todos', 'Todos'], ['sin_cargar', 'Sin cargar en facturación'], ['cargados', 'Cargados']] as const).map(([valor, texto]) => (
+              <button
+                key={valor}
+                onClick={() => setFiltroCargado(valor)}
+                className={`px-3 py-1.5 rounded-card text-xs font-medium ${
+                  filtroCargado === valor ? 'bg-frost-700 text-white' : 'bg-white text-frost-700 border border-frost-200'
+                }`}
+              >
+                {texto}
+              </button>
+            ))}
+          </div>
           {entregadosHistorial.length === 0 && (
             <p className="text-sm text-frost-400">
               {busquedaEntregados.trim() ? 'No hay entregados que coincidan con la búsqueda.' : 'Todavía no hay pedidos entregados y cobrados.'}
@@ -551,14 +606,13 @@ export default function PedidosPage() {
           )}
           <div className="space-y-2">
             {entregadosHistorial.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => setPedidoAbierto(p)}
-                className="w-full flex items-center justify-between bg-frost-50 hover:bg-frost-100 rounded-card p-3 text-left"
-              >
-                <div>
-                  <p className="text-sm font-medium text-frost-800">
+              <div key={p.id} className="flex items-center justify-between gap-2 bg-frost-50 hover:bg-frost-100 rounded-card p-3">
+                <button onClick={() => setPedidoAbierto(p)} className="flex-1 min-w-0 text-left">
+                  <p className="text-sm font-medium text-frost-800 flex items-center gap-2 flex-wrap">
                     #{p.numero} · {p.clientes?.nombre_apellido ?? p.nombre_contacto}
+                    {p.cargado_facturacion && (
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-card bg-green-600 text-white">CARGADO</span>
+                    )}
                   </p>
                   <p className="text-xs text-frost-500">
                     {formatearPesos(p.total)} · entregado el {new Date(p.actualizado_en).toLocaleString('es-AR')}
@@ -568,8 +622,18 @@ export default function PedidosPage() {
                       Cajón {p.cajon}
                     </span>
                   )}
-                </div>
-              </button>
+                </button>
+                <button
+                  onClick={() => marcarCargado(p, !p.cargado_facturacion)}
+                  className={`shrink-0 text-xs font-medium rounded-card px-2 py-1.5 border ${
+                    p.cargado_facturacion
+                      ? 'text-frost-500 border-frost-200 hover:bg-white'
+                      : 'text-green-700 border-green-300 bg-green-50 hover:bg-green-100'
+                  }`}
+                >
+                  {p.cargado_facturacion ? 'Quitar CARGADO' : 'Marcar CARGADO'}
+                </button>
+              </div>
             ))}
           </div>
         </div>
@@ -764,6 +828,11 @@ export default function PedidosPage() {
                 </p>
                 <p className="text-xs text-yellow-700 mt-1">{formatearPesos(p.total)}</p>
                 <div className="flex flex-wrap gap-1 mt-1">
+                  {p.cargado_facturacion && (
+                    <span className="inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-card bg-green-600 text-white">
+                      CARGADO
+                    </span>
+                  )}
                   {p.clientes?.unidad_negocio && (
                     <span
                       className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-card ${UNIDAD_NEGOCIO_COLOR[p.clientes.unidad_negocio]}`}
@@ -804,6 +873,8 @@ export default function PedidosPage() {
           onGuardarItems={guardarItemsPedido}
           onActivarCuotas={activarPlanCuotas}
           onSaldarPlan={saldarPlanCuotas}
+          onActualizarCobroDividido={actualizarCobroDividido}
+          onMarcarCargado={marcarCargado}
         />
       )}
     </div>
@@ -836,10 +907,23 @@ function TarjetaAprobacion({
           Informó <strong>{pedido.reporte_por ?? 'la sucursal'}</strong>
           {pedido.reporte_en ? ` el ${new Date(pedido.reporte_en).toLocaleString('es-AR')}` : ''}
         </p>
+        {Array.isArray(pedido.reporte_pagos) && pedido.reporte_pagos.length === 2 && (
+          <p className="text-xs font-semibold text-frost-700 mt-1">Cobro dividido: {describirPagos(pedido.reporte_pagos)}</p>
+        )}
         {pedido.reporte_nota && (
           <p className="text-xs text-amber-700 mt-1 whitespace-pre-wrap">Nota: {pedido.reporte_nota}</p>
         )}
       </button>
+      {Array.isArray(pedido.comprobantes) && pedido.comprobantes.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          {pedido.comprobantes.map((url, i) => (
+            <a key={url} href={url} target="_blank" rel="noreferrer">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={url} alt={`Comprobante ${i + 1}`} className="w-12 h-12 object-cover rounded-card border border-frost-200" />
+            </a>
+          ))}
+        </div>
+      )}
       <div className="flex items-center gap-2 mt-2">
         <select className="input-field !py-1.5 text-sm flex-1" value={metodo} onChange={(e) => setMetodo(e.target.value)}>
           {COBROS_SUCURSAL.map((c) => (
@@ -886,6 +970,8 @@ function DetallePedido({
   onGuardarItems,
   onActivarCuotas,
   onSaldarPlan,
+  onActualizarCobroDividido,
+  onMarcarCargado,
 }: {
   pedido: Pedido;
   clientes: Cliente[];
@@ -899,6 +985,8 @@ function DetallePedido({
   onActualizarCajon: (p: Pedido, cajon: string) => void;
   onActivarCuotas: (p: Pedido, cantidadCuotas: number, fechaInicio: string) => Promise<void>;
   onSaldarPlan: (p: Pedido) => Promise<void>;
+  onActualizarCobroDividido: (p: Pedido, pagos: PagoParte[]) => Promise<void>;
+  onMarcarCargado: (p: Pedido, cargado: boolean) => Promise<void>;
   onGuardarItems: (
     p: Pedido,
     items: {
@@ -938,6 +1026,10 @@ function DetallePedido({
   const [buscarProducto, setBuscarProducto] = useState('');
 
   const [compartiendo, setCompartiendo] = useState(false);
+  const esDividido = pedido.metodo_pago === 'mixto' && Array.isArray(pedido.pagos) && pedido.pagos.length === 2;
+  const [dividiendo, setDividiendo] = useState(false);
+  const [pagosEdit, setPagosEdit] = useState<PagoParte[] | null>(null);
+  const mostrarDividido = dividiendo || esDividido;
 
   useEffect(() => {
     setCajonEdit(pedido.cajon ?? '');
@@ -1443,18 +1535,41 @@ function DetallePedido({
             <label className="text-xs font-semibold text-frost-500 uppercase">Cobro</label>
             <select
               className="input-field mt-1"
-              value={pedido.metodo_pago ?? ''}
-              onChange={(e) =>
-                onActualizarCobro(pedido, e.target.value, e.target.value === 'pendiente_pago' ? false : true)
-              }
+              value={mostrarDividido ? 'dividido' : pedido.metodo_pago ?? ''}
+              onChange={(e) => {
+                if (e.target.value === 'dividido') {
+                  setDividiendo(true);
+                  return;
+                }
+                setDividiendo(false);
+                onActualizarCobro(pedido, e.target.value, e.target.value === 'pendiente_pago' ? false : true);
+              }}
             >
               <option value="">Sin definir</option>
               <option value="efectivo">Efectivo</option>
               <option value="transferencia">Transferencia</option>
               <option value="pendiente_pago">Pendiente de Pago</option>
               <option value="cheque">Cheque</option>
-              <option value="mixto">Mixto</option>
+              <option value="dividido">Dos formas de pago</option>
+              {pedido.metodo_pago === 'mixto' && !esDividido && <option value="mixto">Mixto (sin detalle)</option>}
             </select>
+            {mostrarDividido && (
+              <div className="mt-2 bg-frost-50 rounded-card p-3">
+                <CobroDividido key={pedido.id} total={pedido.total} inicial={esDividido ? pedido.pagos : null} onChange={setPagosEdit} />
+                <button
+                  disabled={!pagosEdit}
+                  onClick={async () => {
+                    if (pagosEdit) {
+                      await onActualizarCobroDividido(pedido, pagosEdit);
+                      setDividiendo(false);
+                    }
+                  }}
+                  className="mt-2 w-full btn-primary disabled:opacity-50"
+                >
+                  Guardar cobro
+                </button>
+              </div>
+            )}
             {pedido.metodo_pago === 'pendiente_pago' && (
               <label className="flex items-center gap-2 text-sm text-frost-700 mt-2">
                 <input
@@ -1468,7 +1583,47 @@ function DetallePedido({
           </div>
         )}
 
+        {Array.isArray(pedido.comprobantes) && pedido.comprobantes.length > 0 && (
+          <div className="mb-4">
+            <label className="text-xs font-semibold text-frost-500 uppercase">Comprobantes de la sucursal</label>
+            <div className="flex flex-wrap gap-2 mt-1.5">
+              {pedido.comprobantes.map((url, i) => (
+                <a key={url} href={url} target="_blank" rel="noreferrer">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={url} alt={`Comprobante ${i + 1}`} className="w-20 h-20 object-cover rounded-card border border-frost-200" />
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+
         {bloqueCajon}
+
+        {pedido.estado === 'entregado' && (
+          <div className="mb-4">
+            <label className="text-xs font-semibold text-frost-500 uppercase">Sistema de facturación</label>
+            {pedido.cargado_facturacion ? (
+              <div className="mt-1.5 flex items-center justify-between gap-2 bg-green-50 border border-green-200 rounded-card px-3 py-2">
+                <span className="text-sm font-bold text-green-700">
+                  CARGADO
+                  {pedido.cargado_en ? (
+                    <span className="font-normal text-xs text-green-700"> · {new Date(pedido.cargado_en).toLocaleString('es-AR')}</span>
+                  ) : null}
+                </span>
+                <button onClick={() => onMarcarCargado(pedido, false)} className="text-xs text-frost-500 underline">
+                  Quitar marca
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => onMarcarCargado(pedido, true)}
+                className="mt-1.5 w-full text-sm font-medium text-green-700 border border-green-300 bg-green-50 rounded-card px-3 py-2 hover:bg-green-100"
+              >
+                Marcar como CARGADO en facturación
+              </button>
+            )}
+          </div>
+        )}
 
         {pedido.estado === 'entregado' ? (
           <div className="border-t border-frost-100 pt-3">
