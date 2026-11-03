@@ -1,0 +1,1719 @@
+'use client';
+
+import { useEffect, useRef, useState } from 'react';
+import { supabase } from '@/lib/supabase/client';
+import type { Cliente, EstadoPedido, Pedido, PedidoItem, Producto } from '@/lib/types';
+import Link from 'next/link';
+import { ESTADOS_LABEL, UNIDAD_NEGOCIO_LABEL, UNIDAD_NEGOCIO_COLOR, MARCA_PRODUCTO_LABEL } from '@/lib/types';
+import { registrarLog } from '@/lib/log';
+import { compartirPedido, precargarLogoPedido } from '@/lib/compartirPedido';
+import { type CatalogoConfig, configPorDefecto, normalizarConfig, ordenarCategorias } from '@/lib/catalogo';
+import { formatearPesos } from '@/lib/formato';
+import { COBROS_SUCURSAL, SUCURSALES, buscarSucursal } from '@/lib/sucursales';
+import CobroDividido from '@/components/CobroDividido';
+import { describirPagos, type PagoParte } from '@/lib/pagos';
+
+// Agrupa los productos de un pedido por categoría (en el orden del catálogo) y suma
+// las unidades pedidas de cada una. Los productos sin categoría van al final.
+const SIN_CATEGORIA = 'Sin categoría';
+function agruparPorCategoria(
+  items: PedidoItem[],
+  categoriaPorProducto: Record<string, string>,
+  config: CatalogoConfig
+) {
+  const mapa = new Map<string, PedidoItem[]>();
+  for (const it of items) {
+    const cat = (it.producto_id && categoriaPorProducto[it.producto_id]) || SIN_CATEGORIA;
+    mapa.set(cat, [...(mapa.get(cat) ?? []), it]);
+  }
+  const conCategoria = ordenarCategorias(
+    Array.from(mapa.keys()).filter((c) => c !== SIN_CATEGORIA),
+    config
+  );
+  const orden = mapa.has(SIN_CATEGORIA) ? [...conCategoria, SIN_CATEGORIA] : conCategoria;
+  return orden.map((categoria) => {
+    const lista = mapa.get(categoria) ?? [];
+    return { categoria, items: lista, unidades: lista.reduce((acc, it) => acc + it.cantidad, 0) };
+  });
+}
+
+const COLUMNAS: EstadoPedido[] = ['nuevo', 'preparacion', 'preparado', 'reparto'];
+const ESTADOS_TRANSICION: EstadoPedido[] = ['nuevo', 'preparacion', 'preparado', 'reparto', 'entregado'];
+
+export default function PedidosPage() {
+  const [pedidos, setPedidos] = useState<Pedido[]>([]);
+  const [clientes, setClientes] = useState<Cliente[]>([]);
+  const [cargando, setCargando] = useState(true);
+  const [pedidoAbierto, setPedidoAbierto] = useState<Pedido | null>(null);
+  const [arrastrandoId, setArrastrandoId] = useState<string | null>(null);
+  const [mostrarHistorial, setMostrarHistorial] = useState(false);
+  const [mostrarEntregados, setMostrarEntregados] = useState(false);
+  const [filtroMarca, setFiltroMarca] = useState<Pedido['marca'] | 'todas'>('todas');
+  // Para mostrar los productos del pedido agrupados por categoría.
+  const [categoriaPorProducto, setCategoriaPorProducto] = useState<Record<string, string>>({});
+  const [configsCatalogo, setConfigsCatalogo] = useState<Record<string, CatalogoConfig>>({});
+  const [busquedaEntregados, setBusquedaEntregados] = useState('');
+  const [busquedaCancelados, setBusquedaCancelados] = useState('');
+  const [filtroCargado, setFiltroCargado] = useState<'todos' | 'sin_cargar' | 'cargados'>('todos');
+  const [actualizando, setActualizando] = useState(false);
+  const [tirando, setTirando] = useState(0);
+  const primeraCarga = useRef(true);
+
+  async function cargarTodo() {
+    // La primera vez mostramos "Cargando..."; después refrescamos en silencio
+    // para que el tablero no desaparezca ni salte al actualizar.
+    if (primeraCarga.current) setCargando(true);
+    const [{ data: pedidosData }, { data: clientesData }, { data: productosCat }, { data: configsData }] =
+      await Promise.all([
+        supabase
+          .from('pedidos')
+          .select('*, clientes(*), pedido_items(*)')
+          .order('orden', { ascending: true }),
+        supabase.from('clientes').select('*').order('nombre_apellido'),
+        supabase.from('productos').select('id, categoria'),
+        supabase.from('catalogo_config').select('*'),
+      ]);
+    setPedidos((pedidosData as any) ?? []);
+    setClientes(clientesData ?? []);
+    const mapaCategorias: Record<string, string> = {};
+    for (const pr of (productosCat as any[]) ?? []) {
+      if (pr.categoria) mapaCategorias[pr.id] = pr.categoria;
+    }
+    setCategoriaPorProducto(mapaCategorias);
+    const mapaConfigs: Record<string, CatalogoConfig> = {};
+    for (const c of (configsData as any[]) ?? []) {
+      if (c.marca === 'grido' || c.marca === 'via_vana') mapaConfigs[c.marca] = normalizarConfig(c.marca, c);
+    }
+    setConfigsCatalogo(mapaConfigs);
+    // Si hay una ventana de detalle abierta, la refrescamos con el dato
+    // recién traído — si no, queda mostrando una copia vieja en memoria
+    // hasta que el usuario la cierra y la vuelve a abrir.
+    setPedidoAbierto((prev) => {
+      if (!prev) return prev;
+      return (pedidosData as any)?.find((p: any) => p.id === prev.id) ?? null;
+    });
+    primeraCarga.current = false;
+    setCargando(false);
+  }
+
+  async function actualizarManual() {
+    if (actualizando) return;
+    setActualizando(true);
+    try {
+      await cargarTodo();
+    } finally {
+      setActualizando(false);
+    }
+  }
+  const actualizarRef = useRef(actualizarManual);
+  actualizarRef.current = actualizarManual;
+
+  useEffect(() => {
+    cargarTodo();
+  }, []);
+
+  // Al volver a la app (típico en iPhone, donde la app instalada queda en segundo plano) se refresca sola.
+  useEffect(() => {
+    function alVolver() {
+      if (document.visibilityState === 'visible') actualizarRef.current();
+    }
+    document.addEventListener('visibilitychange', alVolver);
+    return () => document.removeEventListener('visibilitychange', alVolver);
+  }, []);
+
+  // iPhone/iPad no traen "deslizar para actualizar" en apps instaladas: lo armamos acá.
+  useEffect(() => {
+    const esIOS =
+      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (!esIOS) return;
+    let inicioY: number | null = null;
+    let distancia = 0;
+    const onStart = (e: TouchEvent) => {
+      inicioY = window.scrollY <= 0 ? e.touches[0].clientY : null;
+      distancia = 0;
+    };
+    const onMove = (e: TouchEvent) => {
+      if (inicioY === null) return;
+      distancia = Math.max(0, e.touches[0].clientY - inicioY);
+      setTirando(Math.min(distancia, 90));
+    };
+    const onEnd = () => {
+      if (inicioY !== null && distancia > 80) actualizarRef.current();
+      inicioY = null;
+      distancia = 0;
+      setTirando(0);
+    };
+    document.addEventListener('touchstart', onStart, { passive: true });
+    document.addEventListener('touchmove', onMove, { passive: true });
+    document.addEventListener('touchend', onEnd, { passive: true });
+    return () => {
+      document.removeEventListener('touchstart', onStart);
+      document.removeEventListener('touchmove', onMove);
+      document.removeEventListener('touchend', onEnd);
+    };
+  }, []);
+
+  async function cambiarEstado(pedido: Pedido, estado: EstadoPedido) {
+    if (pedido.estado === 'entregado') return; // terminal: no se puede revertir
+    if (estado === 'entregado' && !pedido.cliente_id) {
+      alert('Debe asignar a un cliente antes de marcar el pedido como entregado.');
+      return;
+    }
+    const actualizacion: Record<string, any> = { estado, actualizado_en: new Date().toISOString() };
+    if (estado === 'entregado') {
+      // Se considera pagado si ya se eligió una forma de pago real (efectivo,
+      // transferencia, etc.). Con "Pendiente de Pago" se respeta el tilde
+      // "Ya lo pagó". Si no hay forma de pago, cae en la columna amarilla de
+      // Pendiente de Pago. El cobro se lee de la base y no de la copia en
+      // pantalla, que puede estar desactualizada si se acaba de cambiar.
+      const { data: actual } = await supabase
+        .from('pedidos')
+        .select('metodo_pago, pagado')
+        .eq('id', pedido.id)
+        .maybeSingle();
+      const metodo = actual?.metodo_pago ?? pedido.metodo_pago;
+      const yaPagado = actual?.pagado ?? pedido.pagado;
+      actualizacion.pagado = metodo === 'pendiente_pago' ? Boolean(yaPagado) : Boolean(metodo);
+    }
+    const { error: errorEstado } = await supabase.from('pedidos').update(actualizacion).eq('id', pedido.id);
+    if (errorEstado) {
+      alert('No se pudo cambiar el estado del pedido: ' + errorEstado.message);
+      return;
+    }
+    await cargarTodo();
+    setPedidoAbierto(null);
+  }
+
+  async function cancelarPedido(pedido: Pedido) {
+    if (!confirm(`¿Cancelar el pedido #${pedido.numero}? Sale de los tableros activos, pero queda guardado en el historial.`)) {
+      return;
+    }
+    await supabase.from('pedidos').update({ estado: 'cancelado' }).eq('id', pedido.id);
+    await registrarLog('cancelar_pedido', 'pedido', pedido.id, `Pedido #${pedido.numero} cancelado`);
+    await cargarTodo();
+    setPedidoAbierto(null);
+  }
+
+  async function asignarCliente(pedido: Pedido, clienteId: string) {
+    await supabase.from('pedidos').update({ cliente_id: clienteId || null }).eq('id', pedido.id);
+    await cargarTodo();
+  }
+
+  async function actualizarCobro(pedido: Pedido, metodo: string, pagado: boolean) {
+    const { error } = await supabase
+      .from('pedidos')
+      .update({ metodo_pago: metodo || null, pagado, pagos: null })
+      .eq('id', pedido.id);
+    if (error) {
+      alert('No se pudo guardar la forma de cobro: ' + error.message);
+      await cargarTodo();
+      return;
+    }
+    await registrarLog(
+      'actualizar_cobro',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: método "${metodo || 'sin definir'}", pagado: ${pagado ? 'sí' : 'no'}`
+    );
+    await cargarTodo();
+  }
+
+  async function actualizarCobroDividido(pedido: Pedido, pagos: PagoParte[]) {
+    const { error } = await supabase
+      .from('pedidos')
+      .update({ metodo_pago: 'mixto', pagado: true, pagos })
+      .eq('id', pedido.id);
+    if (error) {
+      alert('No se pudo guardar el cobro: ' + error.message);
+      await cargarTodo();
+      return;
+    }
+    await registrarLog(
+      'actualizar_cobro',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: cobro dividido, ${describirPagos(pagos)}`
+    );
+    await cargarTodo();
+  }
+
+  // Para pedidos que no vienen del catálogo con retiro (por ejemplo, de Venta Directa):
+  // les asigna la sucursal y desde ahí se pueden compartir con el link.
+  async function asignarSucursal(pedido: Pedido, sucursalId: string): Promise<boolean> {
+    const { error } = await supabase
+      .from('pedidos')
+      .update({ tipo_entrega: 'retiro', sucursal: sucursalId })
+      .eq('id', pedido.id);
+    if (error) {
+      alert('No se pudo asignar la sucursal: ' + error.message);
+      return false;
+    }
+    await registrarLog(
+      'asignar_sucursal_pedido',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: enviado a la sucursal ${buscarSucursal(sucursalId)?.nombre ?? sucursalId}`
+    );
+    await cargarTodo();
+    return true;
+  }
+
+  async function marcarCargado(pedido: Pedido, cargado: boolean) {
+    const { error } = await supabase
+      .from('pedidos')
+      .update({ cargado_facturacion: cargado, cargado_en: cargado ? new Date().toISOString() : null })
+      .eq('id', pedido.id);
+    if (error) {
+      alert('No se pudo actualizar la marca de facturación: ' + error.message);
+      return;
+    }
+    await registrarLog(
+      cargado ? 'marcar_cargado_facturacion' : 'desmarcar_cargado_facturacion',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: ${cargado ? 'cargado' : 'desmarcado como cargado'} en el sistema de facturación`
+    );
+    await cargarTodo();
+  }
+
+  async function actualizarCajon(pedido: Pedido, cajon: string) {
+    await supabase.from('pedidos').update({ cajon: cajon || null }).eq('id', pedido.id);
+    await registrarLog(
+      'editar_cajon_pedido',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: cajón actualizado a "${cajon || 'sin definir'}"`
+    );
+    await cargarTodo();
+  }
+
+  async function activarPlanCuotas(pedido: Pedido, cantidadCuotas: number, fechaInicio: string) {
+    const montoBase = Math.floor((pedido.total / cantidadCuotas) * 100) / 100;
+    const filas = Array.from({ length: cantidadCuotas }, (_, i) => {
+      const fecha = new Date(fechaInicio + 'T00:00:00');
+      fecha.setDate(fecha.getDate() + i * 7);
+      // La última cuota absorbe el redondeo, para que la suma dé exacto el total.
+      const esUltima = i === cantidadCuotas - 1;
+      const monto = esUltima
+        ? Math.round((pedido.total - montoBase * (cantidadCuotas - 1)) * 100) / 100
+        : montoBase;
+      return {
+        pedido_id: pedido.id,
+        numero: i + 1,
+        monto_programado: monto,
+        fecha_vencimiento: fecha.toISOString().slice(0, 10),
+      };
+    });
+    await supabase.from('cuotas').insert(filas);
+    await supabase.from('pedidos').update({ financiado_cuotas: true }).eq('id', pedido.id);
+    await registrarLog(
+      'activar_plan_cuotas',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: plan de ${cantidadCuotas} cuotas activado, ${formatearPesos(montoBase)} aprox. c/u, desde ${fechaInicio}`
+    );
+    await cargarTodo();
+  }
+
+  async function guardarItemsPedido(
+    pedido: Pedido,
+    items: {
+      producto_id: string | null;
+      nombre_producto: string;
+      precio_unitario: number;
+      cantidad: number;
+      unidad: string;
+      peso_kg: number;
+      subtotal: number;
+    }[],
+    total: number
+  ) {
+    await supabase.from('pedido_items').delete().eq('pedido_id', pedido.id);
+    if (items.length > 0) {
+      await supabase.from('pedido_items').insert(items.map((it) => ({ pedido_id: pedido.id, ...it })));
+    }
+    await supabase
+      .from('pedidos')
+      .update({ total, actualizado_en: new Date().toISOString() })
+      .eq('id', pedido.id);
+    await registrarLog(
+      'editar_items_pedido',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: total anterior ${formatearPesos(pedido.total)} → nuevo ${formatearPesos(total)}, ${items.length} ítem(s)`
+    );
+    await cargarTodo();
+  }
+
+  // Para planes de cuotas que el cliente terminó pagando todo junto: deja todas las
+  // cuotas como pagadas y el pedido como cobrado.
+  async function saldarPlanCuotas(pedido: Pedido) {
+    const hoy = new Date().toISOString().slice(0, 10);
+    const { data: cuotas, error } = await supabase.from('cuotas').select('*').eq('pedido_id', pedido.id);
+    if (error) {
+      alert(`No se pudieron leer las cuotas: ${error.message}`);
+      return;
+    }
+    for (const c of (cuotas as any[]) ?? []) {
+      if (c.estado === 'pagada') continue;
+      const { error: errorCuota } = await supabase
+        .from('cuotas')
+        .update({
+          monto_pagado: c.monto_programado,
+          estado: 'pagada',
+          fecha_pago: hoy,
+          actualizado_en: new Date().toISOString(),
+        })
+        .eq('id', c.id);
+      if (errorCuota) {
+        alert(`No se pudo actualizar la cuota ${c.numero}: ${errorCuota.message}`);
+        return;
+      }
+    }
+    const { error: errorPedido } = await supabase
+      .from('pedidos')
+      .update({ pagado: true, actualizado_en: new Date().toISOString() })
+      .eq('id', pedido.id);
+    if (errorPedido) {
+      alert(`No se pudo marcar el pedido como pagado: ${errorPedido.message}`);
+      return;
+    }
+    await registrarLog(
+      'registrar_pago_cuota',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: plan de cuotas saldado de una vez, pedido marcado como pagado`
+    );
+    await cargarTodo();
+  }
+
+  // Pedidos que la sucursal informó como entregados y esperan la aprobación de la administración.
+  async function aprobarEntrega(pedido: Pedido, metodo: string) {
+    if (!pedido.cliente_id) {
+      alert(`El pedido #${pedido.numero} no tiene cliente asignado. Abrilo, asignale un cliente y después aprobalo.`);
+      setPedidoAbierto(pedido);
+      return;
+    }
+    const { error } = await supabase
+      .from('pedidos')
+      .update({
+        estado: 'entregado',
+        metodo_pago: metodo,
+        pagos: metodo === 'mixto' ? pedido.reporte_pagos ?? null : null,
+        pagado: metodo !== 'pendiente_pago',
+        reporte_estado: null,
+        actualizado_en: new Date().toISOString(),
+      })
+      .eq('id', pedido.id);
+    if (error) {
+      alert('No se pudo aprobar el pedido: ' + error.message);
+      return;
+    }
+    await registrarLog(
+      'aprobar_entrega_sucursal',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: entrega informada por ${pedido.reporte_por ?? 'la sucursal'} aprobada (${metodo})`
+    );
+    await cargarTodo();
+  }
+
+  async function rechazarEntrega(pedido: Pedido) {
+    const motivo = prompt(`¿Por qué devolvés el pedido #${pedido.numero} a la sucursal? (se lo van a ver en el link)`);
+    if (motivo === null) return;
+    const { error } = await supabase
+      .from('pedidos')
+      .update({ reporte_estado: 'rechazado', reporte_rechazo: motivo.trim() || null })
+      .eq('id', pedido.id);
+    if (error) {
+      alert('No se pudo devolver el pedido: ' + error.message);
+      return;
+    }
+    await registrarLog(
+      'rechazar_entrega_sucursal',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: entrega informada por ${pedido.reporte_por ?? 'la sucursal'} devuelta. Motivo: ${motivo.trim() || 'sin motivo'}`
+    );
+    await cargarTodo();
+  }
+
+  async function reabrirPedido(pedido: Pedido) {
+    await supabase.from('pedidos').update({ estado: 'nuevo' }).eq('id', pedido.id);
+    await cargarTodo();
+  }
+
+  async function eliminarTodosCancelados() {
+    if (cancelados.length === 0) return;
+    if (
+      !confirm(
+        `Esto borra los ${cancelados.length} pedidos cancelados que ves en la lista ahora mismo, para siempre, sin forma de recuperarlos. ¿Seguro?`
+      )
+    ) {
+      return;
+    }
+    const ids = cancelados.map((p) => p.id);
+    const numeros = cancelados.map((p) => p.numero).join(', ');
+    await supabase.from('pedidos').delete().in('id', ids);
+    await registrarLog(
+      'eliminar_pedido',
+      'pedido',
+      null,
+      `Borrado masivo de ${ids.length} pedidos cancelados: #${numeros}`
+    );
+    await cargarTodo();
+  }
+
+  async function eliminarDefinitivo(pedido: Pedido) {
+    if (
+      !confirm(
+        `Esto borra el pedido #${pedido.numero} para siempre, sin forma de recuperarlo. ¿Seguro?`
+      )
+    ) {
+      return;
+    }
+    await supabase.from('pedidos').delete().eq('id', pedido.id);
+    await registrarLog('eliminar_pedido', 'pedido', pedido.id, `Pedido #${pedido.numero} eliminado definitivamente`);
+    await cargarTodo();
+  }
+
+  async function moverEnColumna(estado: EstadoPedido, draggedId: string, targetId: string) {
+    if (draggedId === targetId) return;
+    const columna = pedidos.filter((p) => p.estado === estado).sort((a, b) => a.orden - b.orden);
+    const fromIndex = columna.findIndex((p) => p.id === draggedId);
+    const toIndex = columna.findIndex((p) => p.id === targetId);
+    if (fromIndex === -1 || toIndex === -1) return;
+
+    const reordenado = [...columna];
+    const [item] = reordenado.splice(fromIndex, 1);
+    reordenado.splice(toIndex, 0, item);
+
+    // Actualización optimista en pantalla para que se sienta instantáneo
+    setPedidos((prev) => {
+      const nuevosOrdenes = new Map(reordenado.map((p, i) => [p.id, i * 10]));
+      return prev.map((p) => (nuevosOrdenes.has(p.id) ? { ...p, orden: nuevosOrdenes.get(p.id)! } : p));
+    });
+
+    // Persistir en la base de datos
+    await Promise.all(
+      reordenado.map((p, i) => supabase.from('pedidos').update({ orden: i * 10 }).eq('id', p.id))
+    );
+  }
+
+  // El drag & drop nativo no funciona en pantallas táctiles (celular/tablet),
+  // así que esto da una forma de reordenar que sí funciona ahí: subir o
+  // bajar una posición dentro de su misma columna.
+  async function moverPosicion(estado: EstadoPedido, id: string, direccion: -1 | 1) {
+    const columna = pedidos.filter((p) => p.estado === estado).sort((a, b) => a.orden - b.orden);
+    const index = columna.findIndex((p) => p.id === id);
+    const targetIndex = index + direccion;
+    if (index === -1 || targetIndex < 0 || targetIndex >= columna.length) return;
+    await moverEnColumna(estado, id, columna[targetIndex].id);
+  }
+
+  if (cargando) return <p className="text-frost-500">Cargando pedidos...</p>;
+
+  const pedidosFiltrados = pedidos.filter((p) => filtroMarca === 'todas' || p.marca === filtroMarca);
+
+  const coincide = (p: Pedido, texto: string) => {
+    const q = texto.trim().toLowerCase().replace(/^#/, '');
+    if (!q) return true;
+    const campos = [
+      String(p.numero),
+      p.clientes?.nombre_apellido,
+      p.nombre_contacto,
+      p.telefono_contacto,
+      p.direccion_contacto,
+    ];
+    return campos.some((c) => (c ?? '').toLowerCase().includes(q));
+  };
+
+  const enAprobacion = pedidosFiltrados
+    .filter((p) => p.reporte_estado === 'pendiente' && p.estado !== 'entregado' && p.estado !== 'cancelado')
+    .sort((a, b) => new Date(a.reporte_en ?? 0).getTime() - new Date(b.reporte_en ?? 0).getTime());
+  const idsEnAprobacion = new Set(enAprobacion.map((p) => p.id));
+
+  const cancelados = pedidosFiltrados
+    .filter((p) => p.estado === 'cancelado' && coincide(p, busquedaCancelados))
+    .sort((a, b) => new Date(b.actualizado_en).getTime() - new Date(a.actualizado_en).getTime());
+
+  const pendientesPago = pedidosFiltrados
+    .filter((p) => p.estado === 'entregado' && !p.pagado)
+    .sort((a, b) => new Date(a.actualizado_en).getTime() - new Date(b.actualizado_en).getTime());
+
+  const entregadosHistorial = pedidosFiltrados
+    .filter((p) => p.estado === 'entregado' && p.pagado && coincide(p, busquedaEntregados))
+    .filter((p) => filtroCargado === 'todos' || (filtroCargado === 'cargados' ? p.cargado_facturacion : !p.cargado_facturacion))
+    .sort((a, b) => new Date(b.actualizado_en).getTime() - new Date(a.actualizado_en).getTime());
+
+  return (
+    <div className="max-w-full overflow-x-hidden">
+      {(tirando > 0 || actualizando) && (
+        <p className="text-center text-xs text-frost-500 mb-2" style={{ height: actualizando ? 16 : Math.max(16, tirando / 3) }}>
+          {actualizando ? 'Actualizando...' : tirando > 80 ? 'Soltá para actualizar' : '↓ Seguí bajando para actualizar'}
+        </p>
+      )}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+        <h1 className="font-display text-2xl text-frost-800">Pedidos</h1>
+        <div className="flex gap-2 flex-wrap">
+          <button
+            onClick={actualizarManual}
+            disabled={actualizando}
+            className="text-sm font-medium text-frost-600 border border-frost-200 rounded-card px-3 py-1.5 hover:bg-frost-50 disabled:opacity-60"
+          >
+            {actualizando ? 'Actualizando...' : '↻ Actualizar'}
+          </button>
+          <button
+            onClick={() => setMostrarEntregados((v) => !v)}
+            className="text-sm font-medium text-frost-600 border border-frost-200 rounded-card px-3 py-1.5 hover:bg-frost-50"
+          >
+            {mostrarEntregados ? 'Ocultar entregados' : 'Entregados'}
+          </button>
+          <button
+            onClick={() => setMostrarHistorial((v) => !v)}
+            className="text-sm font-medium text-frost-600 border border-frost-200 rounded-card px-3 py-1.5 hover:bg-frost-50"
+          >
+            {mostrarHistorial ? 'Ocultar cancelados' : 'Cancelados'}
+          </button>
+        </div>
+      </div>
+
+      <div className="flex gap-2 mb-5 flex-wrap">
+        {(['todas', 'grido', 'via_vana'] as const).map((valor) => (
+          <button
+            key={valor}
+            onClick={() => setFiltroMarca(valor)}
+            className={`px-3 py-2 rounded-card text-sm font-medium ${
+              filtroMarca === valor
+                ? 'bg-frost-700 text-white'
+                : 'bg-white text-frost-700 border border-frost-200'
+            }`}
+          >
+            {valor === 'todas' ? 'Todas' : MARCA_PRODUCTO_LABEL[valor]}
+          </button>
+        ))}
+      </div>
+
+      {mostrarEntregados && (
+        <div className="bg-white rounded-card border border-frost-100 p-4 mb-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-frost-500 mb-3">
+            Pedidos entregados y cobrados
+          </p>
+          <input
+            type="search"
+            className="input-field mb-3"
+            placeholder="Buscar por número, nombre, teléfono o dirección"
+            value={busquedaEntregados}
+            onChange={(e) => setBusquedaEntregados(e.target.value)}
+          />
+          <div className="flex gap-2 mb-3 flex-wrap">
+            {([['todos', 'Todos'], ['sin_cargar', 'Sin cargar en facturación'], ['cargados', 'Cargados']] as const).map(([valor, texto]) => (
+              <button
+                key={valor}
+                onClick={() => setFiltroCargado(valor)}
+                className={`px-3 py-1.5 rounded-card text-xs font-medium ${
+                  filtroCargado === valor ? 'bg-frost-700 text-white' : 'bg-white text-frost-700 border border-frost-200'
+                }`}
+              >
+                {texto}
+              </button>
+            ))}
+          </div>
+          {entregadosHistorial.length === 0 && (
+            <p className="text-sm text-frost-400">
+              {busquedaEntregados.trim() ? 'No hay entregados que coincidan con la búsqueda.' : 'Todavía no hay pedidos entregados y cobrados.'}
+            </p>
+          )}
+          <div className="space-y-2">
+            {entregadosHistorial.map((p) => (
+              <div key={p.id} className="flex items-center justify-between gap-2 bg-frost-50 hover:bg-frost-100 rounded-card p-3">
+                <button onClick={() => setPedidoAbierto(p)} className="flex-1 min-w-0 text-left">
+                  <p className="text-sm font-medium text-frost-800 flex items-center gap-2 flex-wrap">
+                    #{p.numero} · {p.clientes?.nombre_apellido ?? p.nombre_contacto}
+                    {p.cargado_facturacion && (
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-card bg-green-600 text-white">CARGADO</span>
+                    )}
+                  </p>
+                  <p className="text-xs text-frost-500">
+                    {formatearPesos(p.total)} · entregado el {new Date(p.actualizado_en).toLocaleString('es-AR')}
+                  </p>
+                  {p.cajon && (
+                    <span className="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-card mt-1 bg-blue-100 text-blue-700">
+                      Cajón {p.cajon}
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={() => marcarCargado(p, !p.cargado_facturacion)}
+                  className={`shrink-0 text-xs font-medium rounded-card px-2 py-1.5 border ${
+                    p.cargado_facturacion
+                      ? 'text-frost-500 border-frost-200 hover:bg-white'
+                      : 'text-green-700 border-green-300 bg-green-50 hover:bg-green-100'
+                  }`}
+                >
+                  {p.cargado_facturacion ? 'Quitar CARGADO' : 'Marcar CARGADO'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {mostrarHistorial && (
+        <div className="bg-white rounded-card border border-frost-100 p-4 mb-5">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-frost-500">
+              Pedidos cancelados
+            </p>
+            {cancelados.length > 0 && (
+              <button
+                onClick={eliminarTodosCancelados}
+                className="text-xs font-medium text-red-600 border border-red-200 rounded-card px-2 py-1 hover:bg-red-50"
+              >
+                {busquedaCancelados.trim() ? `Borrar estos (${cancelados.length})` : `Borrar todos (${cancelados.length})`}
+              </button>
+            )}
+          </div>
+          <input
+            type="search"
+            className="input-field mb-3"
+            placeholder="Buscar por número, nombre, teléfono o dirección"
+            value={busquedaCancelados}
+            onChange={(e) => setBusquedaCancelados(e.target.value)}
+          />
+          {cancelados.length === 0 && (
+            <p className="text-sm text-frost-400">
+              {busquedaCancelados.trim() ? 'No hay cancelados que coincidan con la búsqueda.' : 'No hay pedidos cancelados.'}
+            </p>
+          )}
+          <div className="space-y-2">
+            {cancelados.map((p) => (
+              <div
+                key={p.id}
+                className="flex items-center justify-between bg-frost-50 rounded-card p-3"
+              >
+                <div>
+                  <p className="text-sm font-medium text-frost-800">
+                    #{p.numero} · {p.clientes?.nombre_apellido ?? p.nombre_contacto}
+                  </p>
+                  <p className="text-xs text-frost-500">
+                    {formatearPesos(p.total)} · cancelado el{' '}
+                    {new Date(p.actualizado_en).toLocaleString('es-AR')}
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => reabrirPedido(p)}
+                    className="text-xs font-medium text-frost-700 border border-frost-200 rounded-card px-2 py-1 hover:bg-white"
+                  >
+                    Reabrir
+                  </button>
+                  <button
+                    onClick={() => eliminarDefinitivo(p)}
+                    className="text-xs font-medium text-red-600 border border-red-200 rounded-card px-2 py-1 hover:bg-red-50"
+                  >
+                    Eliminar definitivo
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {enAprobacion.length > 0 && (
+        <div className="bg-green-50 rounded-card border border-green-200 p-3 mb-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-green-700 mb-3">
+            Pendiente de aprobar · {enAprobacion.length}
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {enAprobacion.map((p) => (
+              <TarjetaAprobacion
+                key={p.id}
+                pedido={p}
+                onVer={() => setPedidoAbierto(p)}
+                onAprobar={aprobarEntrega}
+                onRechazar={rechazarEntrega}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+        {COLUMNAS.map((estado) => {
+          const items = pedidosFiltrados
+            .filter((p) => p.estado === estado && !idsEnAprobacion.has(p.id))
+            .sort((a, b) => a.orden - b.orden);
+          return (
+            <div key={estado} className="bg-white rounded-card border border-frost-100 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-frost-500 mb-3">
+                {ESTADOS_LABEL[estado]} · {items.length}
+              </p>
+              <div className="space-y-2">
+                {items.map((p, idx) => (
+                  <div
+                    key={p.id}
+                    draggable
+                    onDragStart={() => setArrastrandoId(p.id)}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      if (arrastrandoId) moverEnColumna(estado, arrastrandoId, p.id);
+                      setArrastrandoId(null);
+                    }}
+                    onDragEnd={() => setArrastrandoId(null)}
+                    className={`flex items-stretch gap-1 bg-frost-50 hover:bg-frost-100 rounded-card transition-colors md:cursor-move ${
+                      arrastrandoId === p.id ? 'opacity-40' : ''
+                    }`}
+                  >
+                    {items.length > 1 && (
+                      <div className="flex flex-col shrink-0 py-1 pl-1">
+                        <button
+                          onClick={() => moverPosicion(estado, p.id, -1)}
+                          disabled={idx === 0}
+                          className="w-6 h-5 flex items-center justify-center text-frost-400 disabled:opacity-20 hover:text-frost-700"
+                          title="Subir"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" className="w-3.5 h-3.5"><path d="M6 15l6-6 6 6" /></svg>
+                        </button>
+                        <button
+                          onClick={() => moverPosicion(estado, p.id, 1)}
+                          disabled={idx === items.length - 1}
+                          className="w-6 h-5 flex items-center justify-center text-frost-400 disabled:opacity-20 hover:text-frost-700"
+                          title="Bajar"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" className="w-3.5 h-3.5"><path d="M6 9l6 6 6-6" /></svg>
+                        </button>
+                      </div>
+                    )}
+                    <button onClick={() => setPedidoAbierto(p)} className="flex-1 min-w-0 text-left p-3 pl-1">
+                      <p className="text-sm font-medium text-frost-800">
+                        #{p.numero} · {p.clientes?.nombre_apellido ?? p.nombre_contacto}
+                      </p>
+                      <p className="text-xs text-frost-500 mt-1">
+                        {p.origen === 'catalogo_web' ? 'Catálogo web' : 'Carga manual'} · {formatearPesos(p.total)}
+                      </p>
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {p.clientes?.unidad_negocio ? (
+                          <span
+                            className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-card ${UNIDAD_NEGOCIO_COLOR[p.clientes.unidad_negocio]}`}
+                          >
+                            {UNIDAD_NEGOCIO_LABEL[p.clientes.unidad_negocio]}
+                          </span>
+                        ) : (
+                          <span
+                            className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-card ${
+                              p.marca === 'via_vana' ? 'bg-purple-100 text-purple-700' : 'bg-frost-100 text-frost-600'
+                            }`}
+                          >
+                            {MARCA_PRODUCTO_LABEL[p.marca]}
+                          </span>
+                        )}
+                        {p.cajon && (
+                          <span className="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-card bg-blue-100 text-blue-700">
+                            Cajón {p.cajon}
+                          </span>
+                        )}
+                        {p.tipo_entrega === 'retiro' && (
+                          <span className="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-card bg-green-100 text-green-700">
+                            Retira: {buscarSucursal(p.sucursal)?.nombre ?? 'sucursal'}
+                            {p.reporte_estado === 'rechazado' ? ' · devuelto' : ''}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  </div>
+                ))}
+                {items.length === 0 && <p className="text-xs text-frost-300">Sin pedidos</p>}
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Columna especial: entregados que todavía no se cobraron */}
+        <div className="bg-yellow-50 rounded-card border border-yellow-200 p-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-yellow-700 mb-3">
+            Pendiente de Pago · {pendientesPago.length}
+          </p>
+          <div className="space-y-2">
+            {pendientesPago.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setPedidoAbierto(p)}
+                className="w-full text-left bg-yellow-100 hover:bg-yellow-200 rounded-card p-3 transition-colors"
+              >
+                <p className="text-sm font-medium text-yellow-900">
+                  #{p.numero} · {p.clientes?.nombre_apellido ?? p.nombre_contacto}
+                </p>
+                <p className="text-xs text-yellow-700 mt-1">{formatearPesos(p.total)}</p>
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {p.cargado_facturacion && (
+                    <span className="inline-block text-[10px] font-bold px-1.5 py-0.5 rounded-card bg-green-600 text-white">
+                      CARGADO
+                    </span>
+                  )}
+                  {p.clientes?.unidad_negocio && (
+                    <span
+                      className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-card ${UNIDAD_NEGOCIO_COLOR[p.clientes.unidad_negocio]}`}
+                    >
+                      {UNIDAD_NEGOCIO_LABEL[p.clientes.unidad_negocio]}
+                    </span>
+                  )}
+                  {p.cajon && (
+                    <span className="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-card bg-blue-100 text-blue-700">
+                      Cajón {p.cajon}
+                    </span>
+                  )}
+                </div>
+              </button>
+            ))}
+            {pendientesPago.length === 0 && <p className="text-xs text-yellow-600">Sin pendientes</p>}
+          </div>
+        </div>
+      </div>
+
+      <p className="text-xs text-frost-400 mt-4">
+        Usá las flechitas ▲▼ de cada tarjeta para cambiar su orden dentro de la columna (por ejemplo, el
+        orden de reparto). En computadora también podés arrastrar una tarjeta sobre otra.
+      </p>
+
+      {pedidoAbierto && (
+        <DetallePedido
+          pedido={pedidoAbierto}
+          clientes={clientes}
+          categoriaPorProducto={categoriaPorProducto}
+          configCatalogo={configsCatalogo[pedidoAbierto.marca] ?? configPorDefecto(pedidoAbierto.marca)}
+          onCerrar={() => setPedidoAbierto(null)}
+          onCambiarEstado={cambiarEstado}
+          onAsignarCliente={asignarCliente}
+          onCancelar={cancelarPedido}
+          onActualizarCobro={actualizarCobro}
+          onActualizarCajon={actualizarCajon}
+          onGuardarItems={guardarItemsPedido}
+          onActivarCuotas={activarPlanCuotas}
+          onSaldarPlan={saldarPlanCuotas}
+          onActualizarCobroDividido={actualizarCobroDividido}
+          onMarcarCargado={marcarCargado}
+          onAsignarSucursal={asignarSucursal}
+        />
+      )}
+    </div>
+  );
+}
+
+function TarjetaAprobacion({
+  pedido,
+  onVer,
+  onAprobar,
+  onRechazar,
+}: {
+  pedido: Pedido;
+  onVer: () => void;
+  onAprobar: (p: Pedido, metodo: string) => Promise<void>;
+  onRechazar: (p: Pedido) => Promise<void>;
+}) {
+  const [metodo, setMetodo] = useState(pedido.reporte_metodo_pago ?? 'efectivo');
+  const [trabajando, setTrabajando] = useState(false);
+  return (
+    <div className="bg-white border border-green-200 rounded-card p-3">
+      <button onClick={onVer} className="w-full text-left">
+        <p className="text-sm font-medium text-frost-800">
+          #{pedido.numero} · {pedido.clientes?.nombre_apellido ?? pedido.nombre_contacto}
+        </p>
+        <p className="text-xs text-frost-500">
+          {formatearPesos(pedido.total)} · {buscarSucursal(pedido.sucursal)?.nombre ?? 'Sucursal'}
+        </p>
+        <p className="text-xs text-frost-600 mt-1">
+          Informó <strong>{pedido.reporte_por ?? 'la sucursal'}</strong>
+          {pedido.reporte_en ? ` el ${new Date(pedido.reporte_en).toLocaleString('es-AR')}` : ''}
+        </p>
+        {Array.isArray(pedido.reporte_pagos) && pedido.reporte_pagos.length === 2 && (
+          <p className="text-xs font-semibold text-frost-700 mt-1">Cobro dividido: {describirPagos(pedido.reporte_pagos)}</p>
+        )}
+        {pedido.reporte_nota && (
+          <p className="text-xs text-amber-700 mt-1 whitespace-pre-wrap">Nota: {pedido.reporte_nota}</p>
+        )}
+      </button>
+      {Array.isArray(pedido.comprobantes) && pedido.comprobantes.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          {pedido.comprobantes.map((url, i) => (
+            <a key={url} href={url} target="_blank" rel="noreferrer">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={url} alt={`Comprobante ${i + 1}`} className="w-12 h-12 object-cover rounded-card border border-frost-200" />
+            </a>
+          ))}
+        </div>
+      )}
+      <div className="flex items-center gap-2 mt-2">
+        <select className="input-field !py-1.5 text-sm flex-1" value={metodo} onChange={(e) => setMetodo(e.target.value)}>
+          {COBROS_SUCURSAL.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.label}
+            </option>
+          ))}
+          <option value="mixto">Mixto</option>
+        </select>
+        <button
+          disabled={trabajando}
+          onClick={async () => {
+            setTrabajando(true);
+            await onAprobar(pedido, metodo);
+            setTrabajando(false);
+          }}
+          className="text-xs font-semibold text-white bg-green-600 rounded-card px-3 py-2 hover:bg-green-700 disabled:opacity-50"
+        >
+          Aprobar
+        </button>
+        <button
+          disabled={trabajando}
+          onClick={() => onRechazar(pedido)}
+          className="text-xs font-medium text-red-600 border border-red-200 rounded-card px-3 py-2 hover:bg-red-50 disabled:opacity-50"
+        >
+          Devolver
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DetallePedido({
+  pedido,
+  clientes,
+  categoriaPorProducto,
+  configCatalogo,
+  onCerrar,
+  onCambiarEstado,
+  onAsignarCliente,
+  onCancelar,
+  onActualizarCobro,
+  onActualizarCajon,
+  onGuardarItems,
+  onActivarCuotas,
+  onSaldarPlan,
+  onActualizarCobroDividido,
+  onMarcarCargado,
+  onAsignarSucursal,
+}: {
+  pedido: Pedido;
+  clientes: Cliente[];
+  categoriaPorProducto: Record<string, string>;
+  configCatalogo: CatalogoConfig;
+  onCerrar: () => void;
+  onCambiarEstado: (p: Pedido, e: EstadoPedido) => void;
+  onAsignarCliente: (p: Pedido, clienteId: string) => void;
+  onCancelar: (p: Pedido) => void;
+  onActualizarCobro: (p: Pedido, metodo: string, pagado: boolean) => void;
+  onActualizarCajon: (p: Pedido, cajon: string) => void;
+  onActivarCuotas: (p: Pedido, cantidadCuotas: number, fechaInicio: string) => Promise<void>;
+  onSaldarPlan: (p: Pedido) => Promise<void>;
+  onActualizarCobroDividido: (p: Pedido, pagos: PagoParte[]) => Promise<void>;
+  onMarcarCargado: (p: Pedido, cargado: boolean) => Promise<void>;
+  onAsignarSucursal: (p: Pedido, sucursalId: string) => Promise<boolean>;
+  onGuardarItems: (
+    p: Pedido,
+    items: {
+      producto_id: string | null;
+      nombre_producto: string;
+      precio_unitario: number;
+      cantidad: number;
+      unidad: string;
+      peso_kg: number;
+      subtotal: number;
+    }[],
+    total: number
+  ) => Promise<void>;
+}) {
+  const composicionBloqueada = pedido.estado === 'entregado' || pedido.estado === 'cancelado';
+
+  const [editando, setEditando] = useState(false);
+  const [guardandoItems, setGuardandoItems] = useState(false);
+  const [cajonEdit, setCajonEdit] = useState(pedido.cajon ?? '');
+  const [formCuotasAbierto, setFormCuotasAbierto] = useState(false);
+  const [cantidadCuotas, setCantidadCuotas] = useState(4);
+  const [fechaInicioCuotas, setFechaInicioCuotas] = useState(new Date().toISOString().slice(0, 10));
+  const [activandoCuotas, setActivandoCuotas] = useState(false);
+  const [itemsEdit, setItemsEdit] = useState<
+    {
+      id: string;
+      producto_id: string | null;
+      nombre_producto: string;
+      precio_unitario: number;
+      cantidad: number;
+      unidad: string;
+      peso_kg: number;
+      subtotal: number;
+    }[]
+  >([]);
+  const [productosDisponibles, setProductosDisponibles] = useState<Producto[] | null>(null);
+  const [buscarProducto, setBuscarProducto] = useState('');
+
+  const [compartiendo, setCompartiendo] = useState(false);
+  const esDividido = pedido.metodo_pago === 'mixto' && Array.isArray(pedido.pagos) && pedido.pagos.length === 2;
+  const [dividiendo, setDividiendo] = useState(false);
+  const [sucursalAEnviar, setSucursalAEnviar] = useState('');
+  const [pagosEdit, setPagosEdit] = useState<PagoParte[] | null>(null);
+  const mostrarDividido = dividiendo || esDividido;
+
+  useEffect(() => {
+    setCajonEdit(pedido.cajon ?? '');
+  }, [pedido.id, pedido.cajon]);
+
+  useEffect(() => {
+    precargarLogoPedido();
+  }, []);
+
+  async function compartir() {
+    setCompartiendo(true);
+    try {
+      const resultado = await compartirPedido(pedido);
+      if (resultado === 'descargado') {
+        alert(
+          'Se descargó la imagen del pedido. Desde el celular, este botón abre directamente WhatsApp; desde la computadora, adjuntá la imagen descargada en el chat.'
+        );
+      }
+    } catch (e) {
+      alert(`No se pudo generar la imagen del pedido: ${(e as Error).message}`);
+    }
+    setCompartiendo(false);
+  }
+
+  async function compartirLinkSucursal(sucursalId?: string) {
+    if (!pedido.token_sucursal) {
+      alert('Este pedido todavía no tiene link de sucursal. Recargá la página e intentá de nuevo.');
+      return;
+    }
+    const url = `${window.location.origin}/sucursal/${pedido.token_sucursal}`;
+    const lineas = (pedido.pedido_items ?? []).map((it) => `• ${it.cantidad} x ${it.nombre_producto}`);
+    const texto = [
+      `Pedido #${pedido.numero} · Retira en ${buscarSucursal(sucursalId ?? pedido.sucursal)?.nombre ?? 'sucursal'}`,
+      `Cliente: ${pedido.clientes?.nombre_apellido || pedido.nombre_contacto}`,
+      `Tel: ${pedido.telefono_contacto}`,
+      '',
+      ...lineas,
+      '',
+      `Total: ${formatearPesos(pedido.total)}`,
+      '',
+      'Cuando lo entreguen, confírmenlo acá:',
+      url,
+    ].join('\n');
+    if (typeof navigator !== 'undefined' && (navigator as any).share) {
+      try {
+        await (navigator as any).share({ text: texto });
+        return;
+      } catch (e) {
+        if ((e as Error).name === 'AbortError') return;
+      }
+    }
+    window.open(`https://wa.me/?text=${encodeURIComponent(texto)}`, '_blank');
+  }
+
+  function iniciarEdicion() {
+    setItemsEdit(
+      (pedido.pedido_items ?? []).map((it) => ({
+        id: it.id,
+        producto_id: it.producto_id,
+        nombre_producto: it.nombre_producto,
+        precio_unitario: it.precio_unitario,
+        cantidad: it.cantidad,
+        unidad: it.unidad,
+        peso_kg: it.peso_kg ?? 0,
+        subtotal: it.subtotal,
+      }))
+    );
+    setEditando(true);
+    if (!productosDisponibles) {
+      const marca = pedido.clientes?.unidad_negocio === 'via_vana' ? 'via_vana' : 'grido';
+      supabase
+        .from('productos')
+        .select('*')
+        .eq('marca', marca)
+        .order('nombre')
+        .then(({ data }) => setProductosDisponibles(data ?? []));
+    }
+  }
+
+  function agregarProducto(p: Producto) {
+    setItemsEdit((prev) => {
+      const existente = prev.find((it) => it.producto_id === p.id);
+      const precio = p.precio_promo ?? p.precio_normal;
+      if (existente) {
+        return prev.map((it) =>
+          it.producto_id === p.id
+            ? { ...it, cantidad: it.cantidad + 1, subtotal: (it.cantidad + 1) * it.precio_unitario }
+            : it
+        );
+      }
+      return [
+        ...prev,
+        {
+          id: `nuevo-${p.id}-${Date.now()}`,
+          producto_id: p.id,
+          nombre_producto: p.nombre,
+          precio_unitario: precio,
+          cantidad: 1,
+          unidad: p.unidad,
+          peso_kg: p.peso_kg ?? 0,
+          subtotal: precio,
+        },
+      ];
+    });
+  }
+
+  function cambiarCantidadEdit(id: string, delta: number) {
+    setItemsEdit((prev) => {
+      const actualizado = prev
+        .map((it) => {
+          if (it.id !== id) return it;
+          const nuevaCantidad = it.cantidad + delta;
+          if (nuevaCantidad <= 0) return null;
+          return { ...it, cantidad: nuevaCantidad, subtotal: nuevaCantidad * it.precio_unitario };
+        })
+        .filter((it): it is NonNullable<typeof it> => it !== null);
+      return actualizado;
+    });
+  }
+
+  function quitarItem(id: string) {
+    setItemsEdit((prev) => prev.filter((it) => it.id !== id));
+  }
+
+  const totalEdit = itemsEdit.reduce((acc, it) => acc + it.subtotal, 0);
+
+  async function guardarEdicion() {
+    setGuardandoItems(true);
+    await onGuardarItems(
+      pedido,
+      itemsEdit.map((it) => ({
+        producto_id: it.producto_id,
+        nombre_producto: it.nombre_producto,
+        precio_unitario: it.precio_unitario,
+        cantidad: it.cantidad,
+        unidad: it.unidad,
+        peso_kg: it.peso_kg,
+        subtotal: it.subtotal,
+      })),
+      totalEdit
+    );
+    setGuardandoItems(false);
+    setEditando(false);
+  }
+
+  const gruposItems = agruparPorCategoria(pedido.pedido_items ?? [], categoriaPorProducto, configCatalogo);
+
+  const bloqueCajon = (
+        <div className="mb-4">
+          <label className="text-xs font-semibold text-frost-500 uppercase">Cajón(es)</label>
+          <input
+            type="text"
+            placeholder="Ej: 12, 15"
+            className="input-field mt-1"
+            value={cajonEdit}
+            onChange={(e) => setCajonEdit(e.target.value)}
+            onBlur={() => {
+              if (cajonEdit !== (pedido.cajon ?? '')) onActualizarCajon(pedido, cajonEdit);
+            }}
+          />
+          <p className="text-xs text-frost-400 mt-1">
+            Número(s) de cajón donde se preparó la mercadería. Se ve en la tarjeta del pedido sin
+            necesidad de abrirlo.
+          </p>
+        </div>
+  );
+
+  const productosFiltrados = (productosDisponibles ?? []).filter((p) =>
+    p.nombre.toLowerCase().includes(buscarProducto.toLowerCase())
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+      <div className="absolute inset-0 bg-black/40" onClick={onCerrar} />
+      <div className="relative bg-white rounded-card p-6 w-full max-w-lg max-h-[85vh] overflow-y-auto">
+        <div className="flex justify-between items-start mb-4">
+          <div>
+            <h2 className="font-display text-xl text-frost-800">Pedido #{pedido.numero}</h2>
+            <p className="text-xs text-frost-500">
+              {new Date(pedido.creado_en).toLocaleString('es-AR')}
+            </p>
+          </div>
+          <button onClick={onCerrar} className="text-frost-400 text-sm">
+            Cerrar
+          </button>
+        </div>
+
+        <div className="mb-4 rounded-card bg-frost-50 border border-frost-100 px-3 py-3 text-sm">
+          <p className="text-xs font-semibold text-frost-500 uppercase mb-1.5">Datos del pedido</p>
+          <dl className="space-y-1">
+            <div className="flex gap-2">
+              <dt className="w-20 shrink-0 text-frost-500">Nombre</dt>
+              <dd className="text-frost-800 font-medium break-words min-w-0">
+                {pedido.nombre_contacto || pedido.clientes?.nombre_apellido || 'Sin nombre'}
+              </dd>
+            </div>
+            {pedido.clientes?.nombre_comercio && (
+              <div className="flex gap-2">
+                <dt className="w-20 shrink-0 text-frost-500">Comercio</dt>
+                <dd className="text-frost-800 break-words min-w-0">{pedido.clientes.nombre_comercio}</dd>
+              </div>
+            )}
+            <div className="flex gap-2">
+              <dt className="w-20 shrink-0 text-frost-500">Teléfono</dt>
+              <dd className="text-frost-800 break-words min-w-0">
+                {(pedido.telefono_contacto || pedido.clientes?.telefono) ? (
+                  <a
+                    href={`tel:${pedido.telefono_contacto || pedido.clientes?.telefono}`}
+                    className="text-frost-700 underline"
+                  >
+                    {pedido.telefono_contacto || pedido.clientes?.telefono}
+                  </a>
+                ) : (
+                  'Sin teléfono'
+                )}
+              </dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="w-20 shrink-0 text-frost-500">Dirección</dt>
+              <dd className="text-frost-800 break-words min-w-0">
+                {pedido.direccion_contacto || pedido.clientes?.direccion || 'Sin dirección'}
+              </dd>
+            </div>
+          </dl>
+        </div>
+
+        {pedido.tipo_entrega !== 'retiro' && pedido.estado !== 'entregado' && pedido.estado !== 'cancelado' && (
+          <div className="mb-2 rounded-card border border-green-200 bg-green-50 p-3">
+            <p className="text-xs font-semibold text-green-800 uppercase mb-2">Enviar a una sucursal</p>
+            <div className="flex gap-2">
+              <select
+                className="input-field !py-2 flex-1"
+                value={sucursalAEnviar}
+                onChange={(e) => setSucursalAEnviar(e.target.value)}
+              >
+                <option value="">Elegí la sucursal</option>
+                {SUCURSALES.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.nombre}
+                  </option>
+                ))}
+              </select>
+              <button
+                disabled={!sucursalAEnviar}
+                onClick={async () => {
+                  if (await onAsignarSucursal(pedido, sucursalAEnviar)) await compartirLinkSucursal(sucursalAEnviar);
+                }}
+                className="text-sm font-semibold text-white bg-green-600 rounded-card px-3 py-2 hover:bg-green-700 disabled:opacity-50"
+              >
+                Enviar
+              </button>
+            </div>
+          </div>
+        )}
+        {pedido.tipo_entrega === 'retiro' && pedido.estado !== 'entregado' && pedido.estado !== 'cancelado' && (
+          <button
+            onClick={() => compartirLinkSucursal()}
+            className="w-full flex items-center justify-center gap-2 mb-2 px-4 py-2.5 rounded-card bg-green-600 text-sm font-semibold text-white hover:bg-green-700"
+          >
+            Compartir link con la sucursal ({buscarSucursal(pedido.sucursal)?.nombre ?? 'sucursal'})
+          </button>
+        )}
+        <button
+          onClick={compartir}
+          disabled={compartiendo}
+          className="w-full flex items-center justify-center gap-2 mb-4 px-4 py-2.5 rounded-card border border-frost-200 text-sm font-semibold text-frost-700 hover:bg-mango-50 hover:border-mango-400 transition-colors disabled:opacity-50"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.8}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="w-5 h-5"
+          >
+            <path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7M16 6l-4-4-4 4M12 2v13" />
+          </svg>
+          {compartiendo ? 'Preparando imagen...' : 'Compartir pedido (WhatsApp)'}
+        </button>
+
+        <div className="mb-4">
+          <label className="text-xs font-semibold text-frost-500 uppercase">Cliente asignado</label>
+          <div className="flex items-center gap-2 mt-1">
+            <select
+              className="input-field"
+              value={pedido.cliente_id ?? ''}
+              onChange={(e) => onAsignarCliente(pedido, e.target.value)}
+            >
+              <option value="">Sin asignar ({pedido.nombre_contacto})</option>
+              {clientes.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.nombre_apellido} ({UNIDAD_NEGOCIO_LABEL[c.unidad_negocio]})
+                </option>
+              ))}
+            </select>
+            {pedido.clientes?.unidad_negocio && (
+              <span
+                className={`shrink-0 text-xs font-semibold px-2 py-1.5 rounded-card ${UNIDAD_NEGOCIO_COLOR[pedido.clientes.unidad_negocio]}`}
+              >
+                {UNIDAD_NEGOCIO_LABEL[pedido.clientes.unidad_negocio]}
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="mb-4">
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-semibold text-frost-500 uppercase">
+              Productos {composicionBloqueada && '(no editable)'}
+            </label>
+            {!composicionBloqueada && !editando && (
+              <button
+                onClick={iniciarEdicion}
+                className="text-xs font-medium text-frost-600 border border-frost-200 rounded-card px-2 py-1 hover:bg-frost-50"
+              >
+                Editar pedido
+              </button>
+            )}
+          </div>
+
+          {!editando ? (
+            <>
+              <div className="mt-2 space-y-3">
+                {gruposItems.map((grupo) => (
+                  <div key={grupo.categoria}>
+                    <p className="text-xs font-bold text-frost-700 uppercase tracking-wide bg-frost-50 rounded-card px-2 py-1">
+                      {grupo.categoria} ({grupo.unidades})
+                    </p>
+                    <div className="mt-1 space-y-1 px-2">
+                      {grupo.items.map((item) => (
+                        <div key={item.id} className="flex justify-between text-sm text-frost-700">
+                          <span>
+                            {item.cantidad} × {item.nombre_producto}
+                          </span>
+                          <span>{formatearPesos(item.subtotal)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="flex justify-between text-sm font-semibold text-frost-800 border-t border-frost-100 mt-2 pt-2">
+                <span>Total</span>
+                <span>{formatearPesos(pedido.total)}</span>
+              </div>
+              <div className="flex justify-between text-xs text-frost-400 mt-1">
+                <span>Peso total</span>
+                <span>
+                  {(pedido.pedido_items ?? [])
+                    .reduce((acc, item) => acc + item.cantidad * (item.peso_kg ?? 0), 0)
+                    .toFixed(2)}{' '}
+                  kg
+                </span>
+              </div>
+            </>
+          ) : (
+            <div className="mt-2 bg-frost-50 rounded-card p-3">
+              <div className="space-y-2 mb-3">
+                {itemsEdit.map((it) => (
+                  <div key={it.id} className="flex items-center gap-2">
+                    <span className="flex-1 text-sm text-frost-700 truncate">{it.nombre_producto}</span>
+                    <button
+                      onClick={() => cambiarCantidadEdit(it.id, -1)}
+                      className="w-6 h-6 rounded-card bg-white border border-frost-200 text-frost-700 text-sm"
+                    >
+                      −
+                    </button>
+                    <span className="w-5 text-center text-xs">{it.cantidad}</span>
+                    <button
+                      onClick={() => cambiarCantidadEdit(it.id, 1)}
+                      className="w-6 h-6 rounded-card bg-white border border-frost-200 text-frost-700 text-sm"
+                    >
+                      +
+                    </button>
+                    <span className="text-xs text-frost-600 w-16 text-right">{formatearPesos(it.subtotal)}</span>
+                    <button
+                      onClick={() => quitarItem(it.id)}
+                      className="text-red-500 text-xs px-1"
+                      title="Quitar producto"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                {itemsEdit.length === 0 && (
+                  <p className="text-xs text-frost-400">Sin productos — agregá al menos uno.</p>
+                )}
+              </div>
+
+              <div className="flex justify-between text-sm font-semibold text-frost-800 border-t border-frost-200 pt-2 mb-3">
+                <span>Total</span>
+                <span>{formatearPesos(totalEdit)}</span>
+              </div>
+
+              <input
+                placeholder="Buscar producto para agregar..."
+                className="input-field text-sm mb-2"
+                value={buscarProducto}
+                onChange={(e) => setBuscarProducto(e.target.value)}
+              />
+              <div className="max-h-40 overflow-y-auto space-y-1 mb-3">
+                {productosDisponibles === null && <p className="text-xs text-frost-400">Cargando productos...</p>}
+                {productosFiltrados.map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => agregarProducto(p)}
+                    className="w-full flex justify-between text-left text-xs bg-white hover:bg-frost-100 rounded-card px-2 py-1.5"
+                  >
+                    <span>{p.nombre}</span>
+                    <span className="text-frost-500">{formatearPesos((p.precio_promo ?? p.precio_normal))}</span>
+                  </button>
+                ))}
+                {productosDisponibles !== null && productosFiltrados.length === 0 && (
+                  <p className="text-xs text-frost-400">Sin resultados.</p>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setEditando(false)}
+                  className="px-3 py-1.5 text-xs text-frost-500"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={guardarEdicion}
+                  disabled={guardandoItems || itemsEdit.length === 0}
+                  className="btn-primary text-xs px-3 py-1.5"
+                >
+                  {guardandoItems ? 'Guardando...' : 'Guardar cambios'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="mb-4">
+          <label className="text-xs font-semibold text-frost-500 uppercase">Plan de pago</label>
+          {pedido.financiado_cuotas ? (
+            <div className="mt-1.5 bg-blue-50 border border-blue-200 rounded-card px-3 py-3 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5 text-blue-600 shrink-0">
+                  <path d="M3 10h18M5 6h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z" />
+                </svg>
+                <p className="text-sm text-blue-900 font-medium">Financiado en cuotas</p>
+              </div>
+              <Link
+                href="/admin/cobranzas"
+                className="text-xs font-semibold text-blue-700 bg-white border border-blue-200 rounded-card px-2.5 py-1.5 shrink-0 hover:bg-blue-100"
+              >
+                Ver en Cobranzas
+              </Link>
+            </div>
+          ) : !formCuotasAbierto ? (
+            <button
+              onClick={() => setFormCuotasAbierto(true)}
+              className="mt-1.5 w-full flex items-center gap-2 text-sm font-medium text-frost-700 bg-white border border-frost-200 rounded-card px-3 py-2.5 hover:border-mango-400 hover:bg-mango-50 transition-colors"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5 text-frost-400 shrink-0">
+                <path d="M3 10h18M5 6h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z" />
+              </svg>
+              Financiar en cuotas
+            </button>
+          ) : (
+            <div className="mt-1 bg-frost-50 rounded-card p-3 space-y-2">
+              <div>
+                <label className="text-xs text-frost-500">Cantidad de cuotas</label>
+                <select
+                  className="input-field mt-1"
+                  value={cantidadCuotas}
+                  onChange={(e) => setCantidadCuotas(Number(e.target.value))}
+                >
+                  <option value={3}>3 cuotas semanales</option>
+                  <option value={4}>4 cuotas semanales</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-frost-500">Fecha de la primera cuota</label>
+                <input
+                  type="date"
+                  className="input-field mt-1"
+                  value={fechaInicioCuotas}
+                  onChange={(e) => setFechaInicioCuotas(e.target.value)}
+                />
+              </div>
+              <p className="text-xs text-frost-400">
+                Cada cuota sería de {formatearPesos((pedido.total / cantidadCuotas))} aprox., una por semana.
+              </p>
+              <div className="flex justify-end gap-2 pt-1">
+                <button onClick={() => setFormCuotasAbierto(false)} className="px-3 py-1.5 text-xs text-frost-500">
+                  Cancelar
+                </button>
+                <button
+                  disabled={activandoCuotas}
+                  onClick={async () => {
+                    setActivandoCuotas(true);
+                    await onActivarCuotas(pedido, cantidadCuotas, fechaInicioCuotas);
+                    setActivandoCuotas(false);
+                    setFormCuotasAbierto(false);
+                  }}
+                  className="btn-primary text-xs px-3 py-1.5"
+                >
+                  {activandoCuotas ? 'Activando...' : 'Activar plan'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {pedido.financiado_cuotas ? (
+          <div className="mb-4">
+            <label className="text-xs font-semibold text-frost-500 uppercase">Cobro</label>
+            <p className="text-sm text-frost-500 mt-1">
+              Este pedido se cobra por cuotas, no tiene una forma de cobro única. Va a figurar en "Pendiente de
+              Pago" hasta que termine de pagar todas las cuotas desde Cobranzas — ahí pasa a pagado solo.
+            </p>
+            {!pedido.pagado && (
+              <button
+                onClick={() => {
+                  if (confirm('¿Marcar todas las cuotas como pagadas y el pedido como cobrado?')) onSaldarPlan(pedido);
+                }}
+                className="mt-2 text-sm font-medium text-green-700 border border-green-200 bg-green-50 rounded-card px-3 py-2 hover:bg-green-100"
+              >
+                Pagó todo junto: marcar como pagado
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="mb-4">
+            <label className="text-xs font-semibold text-frost-500 uppercase">Cobro</label>
+            <select
+              className="input-field mt-1"
+              value={mostrarDividido ? 'dividido' : pedido.metodo_pago ?? ''}
+              onChange={(e) => {
+                if (e.target.value === 'dividido') {
+                  setDividiendo(true);
+                  return;
+                }
+                setDividiendo(false);
+                onActualizarCobro(pedido, e.target.value, e.target.value === 'pendiente_pago' ? false : true);
+              }}
+            >
+              <option value="">Sin definir</option>
+              <option value="efectivo">Efectivo</option>
+              <option value="transferencia">Transferencia</option>
+              <option value="pendiente_pago">Pendiente de Pago</option>
+              <option value="cheque">Cheque</option>
+              <option value="dividido">Dos formas de pago</option>
+              {pedido.metodo_pago === 'mixto' && !esDividido && <option value="mixto">Mixto (sin detalle)</option>}
+            </select>
+            {mostrarDividido && (
+              <div className="mt-2 bg-frost-50 rounded-card p-3">
+                <CobroDividido key={pedido.id} total={pedido.total} inicial={esDividido ? pedido.pagos : null} onChange={setPagosEdit} />
+                <button
+                  disabled={!pagosEdit}
+                  onClick={async () => {
+                    if (pagosEdit) {
+                      await onActualizarCobroDividido(pedido, pagosEdit);
+                      setDividiendo(false);
+                    }
+                  }}
+                  className="mt-2 w-full btn-primary disabled:opacity-50"
+                >
+                  Guardar cobro
+                </button>
+              </div>
+            )}
+            {pedido.metodo_pago === 'pendiente_pago' && (
+              <label className="flex items-center gap-2 text-sm text-frost-700 mt-2">
+                <input
+                  type="checkbox"
+                  checked={pedido.pagado}
+                  onChange={(e) => onActualizarCobro(pedido, pedido.metodo_pago!, e.target.checked)}
+                />
+                Ya lo pagó
+              </label>
+            )}
+          </div>
+        )}
+
+        {Array.isArray(pedido.comprobantes) && pedido.comprobantes.length > 0 && (
+          <div className="mb-4">
+            <label className="text-xs font-semibold text-frost-500 uppercase">Comprobantes de la sucursal</label>
+            <div className="flex flex-wrap gap-2 mt-1.5">
+              {pedido.comprobantes.map((url, i) => (
+                <a key={url} href={url} target="_blank" rel="noreferrer">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={url} alt={`Comprobante ${i + 1}`} className="w-20 h-20 object-cover rounded-card border border-frost-200" />
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {bloqueCajon}
+
+        {pedido.estado === 'entregado' && (
+          <div className="mb-4">
+            <label className="text-xs font-semibold text-frost-500 uppercase">Sistema de facturación</label>
+            {pedido.cargado_facturacion ? (
+              <div className="mt-1.5 flex items-center justify-between gap-2 bg-green-50 border border-green-200 rounded-card px-3 py-2">
+                <span className="text-sm font-bold text-green-700">
+                  CARGADO
+                  {pedido.cargado_en ? (
+                    <span className="font-normal text-xs text-green-700"> · {new Date(pedido.cargado_en).toLocaleString('es-AR')}</span>
+                  ) : null}
+                </span>
+                <button onClick={() => onMarcarCargado(pedido, false)} className="text-xs text-frost-500 underline">
+                  Quitar marca
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => onMarcarCargado(pedido, true)}
+                className="mt-1.5 w-full text-sm font-medium text-green-700 border border-green-300 bg-green-50 rounded-card px-3 py-2 hover:bg-green-100"
+              >
+                Marcar como CARGADO en facturación
+              </button>
+            )}
+          </div>
+        )}
+
+        {pedido.estado === 'entregado' ? (
+          <div className="border-t border-frost-100 pt-3">
+            <p className="text-sm text-frost-500">
+              Este pedido ya fue entregado y no se puede volver a un estado anterior ni cancelar.
+              {!pedido.pagado && ' Todavía figura como pendiente de pago.'}
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-2 mb-4">
+              {ESTADOS_TRANSICION.map((estado) => (
+                <button
+                  key={estado}
+                  onClick={() => onCambiarEstado(pedido, estado)}
+                  className={`px-3 py-1.5 rounded-card text-xs font-medium border ${
+                    pedido.estado === estado
+                      ? 'bg-frost-700 text-white border-frost-700'
+                      : 'border-frost-200 text-frost-700'
+                  }`}
+                >
+                  {ESTADOS_LABEL[estado]}
+                </button>
+              ))}
+            </div>
+
+            <div className="border-t border-frost-100 pt-3">
+              <button
+                onClick={() => onCancelar(pedido)}
+                className="text-red-600 text-sm font-medium hover:text-red-700"
+              >
+                Cancelar pedido
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
