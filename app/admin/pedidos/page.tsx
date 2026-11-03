@@ -9,6 +9,7 @@ import { registrarLog } from '@/lib/log';
 import { compartirPedido, precargarLogoPedido } from '@/lib/compartirPedido';
 import { type CatalogoConfig, configPorDefecto, normalizarConfig, ordenarCategorias } from '@/lib/catalogo';
 import { formatearPesos } from '@/lib/formato';
+import { COBROS_SUCURSAL, buscarSucursal } from '@/lib/sucursales';
 
 // Agrupa los productos de un pedido por categoría (en el orden del catálogo) y suma
 // las unidades pedidas de cada una. Los productos sin categoría van al final.
@@ -326,6 +327,56 @@ export default function PedidosPage() {
     await cargarTodo();
   }
 
+  // Pedidos que la sucursal informó como entregados y esperan la aprobación de la administración.
+  async function aprobarEntrega(pedido: Pedido, metodo: string) {
+    if (!pedido.cliente_id) {
+      alert(`El pedido #${pedido.numero} no tiene cliente asignado. Abrilo, asignale un cliente y después aprobalo.`);
+      setPedidoAbierto(pedido);
+      return;
+    }
+    const { error } = await supabase
+      .from('pedidos')
+      .update({
+        estado: 'entregado',
+        metodo_pago: metodo,
+        pagado: metodo !== 'pendiente_pago',
+        reporte_estado: null,
+        actualizado_en: new Date().toISOString(),
+      })
+      .eq('id', pedido.id);
+    if (error) {
+      alert('No se pudo aprobar el pedido: ' + error.message);
+      return;
+    }
+    await registrarLog(
+      'aprobar_entrega_sucursal',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: entrega informada por ${pedido.reporte_por ?? 'la sucursal'} aprobada (${metodo})`
+    );
+    await cargarTodo();
+  }
+
+  async function rechazarEntrega(pedido: Pedido) {
+    const motivo = prompt(`¿Por qué devolvés el pedido #${pedido.numero} a la sucursal? (se lo van a ver en el link)`);
+    if (motivo === null) return;
+    const { error } = await supabase
+      .from('pedidos')
+      .update({ reporte_estado: 'rechazado', reporte_rechazo: motivo.trim() || null })
+      .eq('id', pedido.id);
+    if (error) {
+      alert('No se pudo devolver el pedido: ' + error.message);
+      return;
+    }
+    await registrarLog(
+      'rechazar_entrega_sucursal',
+      'pedido',
+      pedido.id,
+      `Pedido #${pedido.numero}: entrega informada por ${pedido.reporte_por ?? 'la sucursal'} devuelta. Motivo: ${motivo.trim() || 'sin motivo'}`
+    );
+    await cargarTodo();
+  }
+
   async function reabrirPedido(pedido: Pedido) {
     await supabase.from('pedidos').update({ estado: 'nuevo' }).eq('id', pedido.id);
     await cargarTodo();
@@ -415,6 +466,11 @@ export default function PedidosPage() {
     ];
     return campos.some((c) => (c ?? '').toLowerCase().includes(q));
   };
+
+  const enAprobacion = pedidosFiltrados
+    .filter((p) => p.reporte_estado === 'pendiente' && p.estado !== 'entregado' && p.estado !== 'cancelado')
+    .sort((a, b) => new Date(a.reporte_en ?? 0).getTime() - new Date(b.reporte_en ?? 0).getTime());
+  const idsEnAprobacion = new Set(enAprobacion.map((p) => p.id));
 
   const cancelados = pedidosFiltrados
     .filter((p) => p.estado === 'cancelado' && coincide(p, busquedaCancelados))
@@ -581,9 +637,30 @@ export default function PedidosPage() {
         </div>
       )}
 
+      {enAprobacion.length > 0 && (
+        <div className="bg-green-50 rounded-card border border-green-200 p-3 mb-5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-green-700 mb-3">
+            Pendiente de aprobar · {enAprobacion.length}
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {enAprobacion.map((p) => (
+              <TarjetaAprobacion
+                key={p.id}
+                pedido={p}
+                onVer={() => setPedidoAbierto(p)}
+                onAprobar={aprobarEntrega}
+                onRechazar={rechazarEntrega}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
         {COLUMNAS.map((estado) => {
-          const items = pedidosFiltrados.filter((p) => p.estado === estado).sort((a, b) => a.orden - b.orden);
+          const items = pedidosFiltrados
+            .filter((p) => p.estado === estado && !idsEnAprobacion.has(p.id))
+            .sort((a, b) => a.orden - b.orden);
           return (
             <div key={estado} className="bg-white rounded-card border border-frost-100 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-frost-500 mb-3">
@@ -652,6 +729,12 @@ export default function PedidosPage() {
                         {p.cajon && (
                           <span className="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-card bg-blue-100 text-blue-700">
                             Cajón {p.cajon}
+                          </span>
+                        )}
+                        {p.tipo_entrega === 'retiro' && (
+                          <span className="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-card bg-green-100 text-green-700">
+                            Retira: {buscarSucursal(p.sucursal)?.nombre ?? 'sucursal'}
+                            {p.reporte_estado === 'rechazado' ? ' · devuelto' : ''}
                           </span>
                         )}
                       </div>
@@ -723,6 +806,68 @@ export default function PedidosPage() {
           onSaldarPlan={saldarPlanCuotas}
         />
       )}
+    </div>
+  );
+}
+
+function TarjetaAprobacion({
+  pedido,
+  onVer,
+  onAprobar,
+  onRechazar,
+}: {
+  pedido: Pedido;
+  onVer: () => void;
+  onAprobar: (p: Pedido, metodo: string) => Promise<void>;
+  onRechazar: (p: Pedido) => Promise<void>;
+}) {
+  const [metodo, setMetodo] = useState(pedido.reporte_metodo_pago ?? 'efectivo');
+  const [trabajando, setTrabajando] = useState(false);
+  return (
+    <div className="bg-white border border-green-200 rounded-card p-3">
+      <button onClick={onVer} className="w-full text-left">
+        <p className="text-sm font-medium text-frost-800">
+          #{pedido.numero} · {pedido.clientes?.nombre_apellido ?? pedido.nombre_contacto}
+        </p>
+        <p className="text-xs text-frost-500">
+          {formatearPesos(pedido.total)} · {buscarSucursal(pedido.sucursal)?.nombre ?? 'Sucursal'}
+        </p>
+        <p className="text-xs text-frost-600 mt-1">
+          Informó <strong>{pedido.reporte_por ?? 'la sucursal'}</strong>
+          {pedido.reporte_en ? ` el ${new Date(pedido.reporte_en).toLocaleString('es-AR')}` : ''}
+        </p>
+        {pedido.reporte_nota && (
+          <p className="text-xs text-amber-700 mt-1 whitespace-pre-wrap">Nota: {pedido.reporte_nota}</p>
+        )}
+      </button>
+      <div className="flex items-center gap-2 mt-2">
+        <select className="input-field !py-1.5 text-sm flex-1" value={metodo} onChange={(e) => setMetodo(e.target.value)}>
+          {COBROS_SUCURSAL.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.label}
+            </option>
+          ))}
+          <option value="mixto">Mixto</option>
+        </select>
+        <button
+          disabled={trabajando}
+          onClick={async () => {
+            setTrabajando(true);
+            await onAprobar(pedido, metodo);
+            setTrabajando(false);
+          }}
+          className="text-xs font-semibold text-white bg-green-600 rounded-card px-3 py-2 hover:bg-green-700 disabled:opacity-50"
+        >
+          Aprobar
+        </button>
+        <button
+          disabled={trabajando}
+          onClick={() => onRechazar(pedido)}
+          className="text-xs font-medium text-red-600 border border-red-200 rounded-card px-3 py-2 hover:bg-red-50 disabled:opacity-50"
+        >
+          Devolver
+        </button>
+      </div>
     </div>
   );
 }
@@ -815,6 +960,36 @@ function DetallePedido({
       alert(`No se pudo generar la imagen del pedido: ${(e as Error).message}`);
     }
     setCompartiendo(false);
+  }
+
+  async function compartirLinkSucursal() {
+    if (!pedido.token_sucursal) {
+      alert('Este pedido todavía no tiene link de sucursal. Recargá la página e intentá de nuevo.');
+      return;
+    }
+    const url = `${window.location.origin}/sucursal/${pedido.token_sucursal}`;
+    const lineas = (pedido.pedido_items ?? []).map((it) => `• ${it.cantidad} x ${it.nombre_producto}`);
+    const texto = [
+      `Pedido #${pedido.numero} · Retira en ${buscarSucursal(pedido.sucursal)?.nombre ?? 'sucursal'}`,
+      `Cliente: ${pedido.clientes?.nombre_apellido || pedido.nombre_contacto}`,
+      `Tel: ${pedido.telefono_contacto}`,
+      '',
+      ...lineas,
+      '',
+      `Total: ${formatearPesos(pedido.total)}`,
+      '',
+      'Cuando lo entreguen, confírmenlo acá:',
+      url,
+    ].join('\n');
+    if (typeof navigator !== 'undefined' && (navigator as any).share) {
+      try {
+        await (navigator as any).share({ text: texto });
+        return;
+      } catch (e) {
+        if ((e as Error).name === 'AbortError') return;
+      }
+    }
+    window.open(`https://wa.me/?text=${encodeURIComponent(texto)}`, '_blank');
   }
 
   function iniciarEdicion() {
@@ -989,6 +1164,14 @@ function DetallePedido({
           </dl>
         </div>
 
+        {pedido.tipo_entrega === 'retiro' && pedido.estado !== 'entregado' && pedido.estado !== 'cancelado' && (
+          <button
+            onClick={compartirLinkSucursal}
+            className="w-full flex items-center justify-center gap-2 mb-2 px-4 py-2.5 rounded-card bg-green-600 text-sm font-semibold text-white hover:bg-green-700"
+          >
+            Compartir link con la sucursal ({buscarSucursal(pedido.sucursal)?.nombre ?? 'sucursal'})
+          </button>
+        )}
         <button
           onClick={compartir}
           disabled={compartiendo}

@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import { formatearPesos } from '@/lib/formato';
 import { MENSAJE_CERRADO_DEFECTO } from '@/lib/catalogo';
 import { notificarSuscriptos } from '@/lib/webpush';
+import { buscarSucursal, textoSucursal } from '@/lib/sucursales';
 
 // Esta ruta corre en el servidor (nunca en el navegador), así que puede usar
 // la service_role key con seguridad. La necesitamos porque el rol público
@@ -26,6 +27,13 @@ export async function POST(req: Request) {
   }
   const { nombre_contacto, telefono_contacto, direccion_contacto, items } = body ?? {};
   const marca: 'grido' | 'via_vana' = body?.marca === 'via_vana' ? 'via_vana' : 'grido';
+  const retiro = body?.tipo_entrega === 'retiro';
+  const sucursalElegida = retiro ? buscarSucursal(body?.sucursal) : null;
+  if (retiro && !sucursalElegida) {
+    return NextResponse.json({ error: 'Elegí la sucursal donde vas a retirar el pedido.' }, { status: 400 });
+  }
+  // Si retira, la "dirección" del pedido pasa a ser la sucursal, así se ve igual en toda la app.
+  const direccionFinal = retiro ? `Retira en ${textoSucursal(sucursalElegida!.id)}` : direccion_contacto;
 
   if (!nombre_contacto || !telefono_contacto || !Array.isArray(items) || items.length === 0) {
     return NextResponse.json({ error: 'Faltan datos del pedido' }, { status: 400 });
@@ -136,7 +144,9 @@ export async function POST(req: Request) {
       estado: 'nuevo',
       nombre_contacto,
       telefono_contacto,
-      direccion_contacto,
+      direccion_contacto: direccionFinal,
+      tipo_entrega: retiro ? 'retiro' : 'envio',
+      sucursal: retiro ? sucursalElegida!.id : null,
       total,
     })
     .select()

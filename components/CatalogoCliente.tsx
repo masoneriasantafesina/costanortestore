@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import type { MarcaProducto, Producto } from '@/lib/types';
 import { formatearPesos } from '@/lib/formato';
+import { SUCURSALES, textoSucursal } from '@/lib/sucursales';
 import {
   type CatalogoConfig,
   configPorDefecto,
@@ -64,6 +65,8 @@ export default function CatalogoCliente({
   const [enviado, setEnviado] = useState(false);
   const [resumenParaWhatsapp, setResumenParaWhatsapp] = useState<string | null>(null);
   const [form, setForm] = useState({ nombre: '', telefono: '', direccion: '' });
+  const [tipoEntrega, setTipoEntrega] = useState<'envio' | 'retiro'>('envio');
+  const [sucursal, setSucursal] = useState('');
 
   // Puntos de destino de la animación de "volar al carrito".
   const iconoBarraRef = useRef<HTMLSpanElement>(null);
@@ -237,7 +240,9 @@ export default function CatalogoCliente({
         body: JSON.stringify({
           nombre_contacto: form.nombre,
           telefono_contacto: form.telefono,
-          direccion_contacto: form.direccion,
+          direccion_contacto: tipoEntrega === 'retiro' ? '' : form.direccion,
+          tipo_entrega: tipoEntrega,
+          sucursal: tipoEntrega === 'retiro' ? sucursal : null,
           marca,
           items: itemsCarrito.map((item) => ({
             producto_id: item.producto.id,
@@ -288,7 +293,7 @@ export default function CatalogoCliente({
     const mensaje = [
       `Pedido de ${form.nombre}`,
       `Tel: ${form.telefono}`,
-      form.direccion ? `Dirección: ${form.direccion}` : null,
+      tipoEntrega === 'retiro' ? `Retira en: ${textoSucursal(sucursal)}` : form.direccion ? `Dirección: ${form.direccion}` : null,
       '',
       ...lineas,
       '',
@@ -671,12 +676,36 @@ export default function CatalogoCliente({
                     value={form.telefono}
                     onChange={(e) => setForm({ ...form, telefono: e.target.value })}
                   />
-                  <input
-                    placeholder="Dirección"
+                  <select
                     className="input-field"
-                    value={form.direccion}
-                    onChange={(e) => setForm({ ...form, direccion: e.target.value })}
-                  />
+                    value={tipoEntrega}
+                    onChange={(e) => setTipoEntrega(e.target.value as 'envio' | 'retiro')}
+                  >
+                    <option value="envio">Te lo llevamos</option>
+                    <option value="retiro">Lo retirás</option>
+                  </select>
+                  {tipoEntrega === 'retiro' ? (
+                    <select
+                      required
+                      className="input-field"
+                      value={sucursal}
+                      onChange={(e) => setSucursal(e.target.value)}
+                    >
+                      <option value="">Elegí la sucursal para retirar</option>
+                      {SUCURSALES.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.nombre} ({s.direccion})
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      placeholder="Dirección"
+                      className="input-field"
+                      value={form.direccion}
+                      onChange={(e) => setForm({ ...form, direccion: e.target.value })}
+                    />
+                  )}
                   <button
                     type="submit"
                     disabled={enviando || faltaParaMinimo > 0}

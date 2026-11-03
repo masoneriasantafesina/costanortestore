@@ -115,6 +115,15 @@ export type Pedido = {
   financiado_cuotas: boolean;
   creado_en: string;
   actualizado_en: string;
+  tipo_entrega?: 'envio' | 'retiro' | null;
+  sucursal?: string | null;
+  token_sucursal?: string | null;
+  reporte_estado?: 'pendiente' | 'rechazado' | null;
+  reporte_metodo_pago?: string | null;
+  reporte_por?: string | null;
+  reporte_nota?: string | null;
+  reporte_en?: string | null;
+  reporte_rechazo?: string | null;
   clientes?: Cliente | null;
   pedido_items?: PedidoItem[];
 };
