@@ -1088,6 +1088,11 @@ function DetallePedido({
     const lineas = (pedido.pedido_items ?? []).map((it) => `• ${it.cantidad} x ${it.nombre_producto}`);
     const texto = [
       `Pedido #${pedido.numero} · Retira en ${buscarSucursal(sucursalId ?? pedido.sucursal)?.nombre ?? 'sucursal'}`,
+      (() => {
+        const u = pedido.clientes?.unidad_negocio ?? (pedido.marca === 'via_vana' ? 'via_vana' : 'grido_store');
+        const icono = u === 'via_vana' ? '🔴🟡' : u === 'gastronomico' ? '🟢' : '🔵';
+        return `${icono} *${UNIDAD_NEGOCIO_LABEL[u]}*`;
+      })(),
       `Cliente: ${pedido.clientes?.nombre_apellido || pedido.nombre_contacto}`,
       `Tel: ${pedido.telefono_contacto}`,
       '',

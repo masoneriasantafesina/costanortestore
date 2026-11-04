@@ -4,12 +4,21 @@ import { useEffect, useState } from 'react';
 import { COBROS_SUCURSAL } from '@/lib/sucursales';
 import { formatearPesos } from '@/lib/formato';
 import CobroDividido from '@/components/CobroDividido';
+import { UNIDAD_NEGOCIO_LABEL, type UnidadNegocio } from '@/lib/types';
+
+// Colores propios de esta página (Via Vana en rojo y amarillo).
+const COLOR_UNIDAD: Record<UnidadNegocio, string> = {
+  grido_store: 'bg-frost-100 text-frost-700',
+  via_vana: 'bg-red-600 text-yellow-300',
+  gastronomico: 'bg-teal-100 text-teal-700',
+};
 import { describirPagos, type PagoParte } from '@/lib/pagos';
 
 type DatosPedido = {
   numero: number;
   estado: string;
   sucursal: string;
+  unidad: UnidadNegocio;
   cliente: string;
   comercio: string | null;
   telefono: string;
@@ -163,6 +172,9 @@ export default function PedidoSucursalPage({ params }: { params: { token: string
     <Caja>
       <p className="text-xs font-semibold uppercase tracking-wide text-frost-500">Retira en {datos.sucursal}</p>
       <h1 className="font-display text-2xl text-frost-800 mb-1">Pedido #{datos.numero}</h1>
+      <p className={`inline-block text-sm font-bold px-2.5 py-1 rounded-card mb-2 ${COLOR_UNIDAD[datos.unidad] ?? 'bg-frost-100 text-frost-700'}`}>
+        {UNIDAD_NEGOCIO_LABEL[datos.unidad] ?? datos.unidad}
+      </p>
       <p className="text-sm text-frost-700 font-medium">{datos.cliente}</p>
       {datos.comercio && <p className="text-xs text-frost-500">{datos.comercio}</p>}
       <p className="text-xs text-frost-500 mb-4">Tel: {datos.telefono}</p>

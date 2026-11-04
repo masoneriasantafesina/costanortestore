@@ -20,7 +20,7 @@ async function buscarPorToken(token: string) {
   if (!TOKEN_VALIDO.test(token)) return null;
   const { data } = await supabase
     .from('pedidos')
-    .select('*, clientes(nombre_apellido, nombre_comercio), pedido_items(nombre_producto, cantidad, unidad)')
+    .select('*, clientes(nombre_apellido, nombre_comercio, unidad_negocio), pedido_items(nombre_producto, cantidad, unidad)')
     .eq('token_sucursal', token)
     .maybeSingle();
   return data as any;
@@ -35,6 +35,7 @@ export async function GET(_req: Request, { params }: { params: { token: string }
     numero: p.numero,
     estado: p.estado,
     sucursal: textoSucursal(p.sucursal),
+    unidad: p.clientes?.unidad_negocio || (p.marca === 'via_vana' ? 'via_vana' : 'grido_store'),
     cliente: p.clientes?.nombre_apellido || p.nombre_contacto,
     comercio: p.clientes?.nombre_comercio || null,
     telefono: p.telefono_contacto,
